@@ -61,8 +61,12 @@ stages:
       - name: Trivy filesystem and IaC scan
         run: |
           set -e
+          # --offline-scan: the Java analyzer otherwise resolves unknown POMs
+          # from Maven Central, which rate-limits the shared GitHub runner IP
+          # (HTTP 429, Retry-After 1800). Detection still runs from the local
+          # vulnerability DB; only the remote POM lookups are disabled.
           ./bin/trivy fs --scanners vuln,secret --severity HIGH,CRITICAL \
-            --exit-code 0 --no-progress application
+            --offline-scan --exit-code 0 --no-progress application
           ./bin/trivy config --severity HIGH,CRITICAL --exit-code 0 --no-progress infra
 
   - id: provision
@@ -276,8 +280,12 @@ pipelines:
           - name: Trivy image scan
             run: |
               set -e
-              ./bin/trivy image --severity HIGH,CRITICAL --exit-code 0 --no-progress \
-                shopfast:${{ github.sha }}
+              # --offline-scan for the same reason as the deploy security stage:
+              # the image contains a Spring Boot fat jar, so the Java analyzer
+              # would otherwise resolve POMs from Maven Central and hit the
+              # shared-runner rate limit (429).
+              ./bin/trivy image --severity HIGH,CRITICAL --offline-scan \
+                --exit-code 0 --no-progress shopfast:${{ github.sha }}
 
       - id: push_ecr
         kind: build_push

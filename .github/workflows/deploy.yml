@@ -55,9 +55,13 @@ jobs:
     - name: Install Trivy
       run: bash .github/scripts/install-trivy.sh
     - name: Trivy filesystem and IaC scan
-      run: "set -e\n./bin/trivy fs --scanners vuln,secret --severity HIGH,CRITICAL\
-        \ \\\n  --exit-code 0 --no-progress application\n./bin/trivy config --severity\
-        \ HIGH,CRITICAL --exit-code 0 --no-progress infra\n"
+      run: "set -e\n# --offline-scan: the Java analyzer otherwise resolves unknown\
+        \ POMs\n# from Maven Central, which rate-limits the shared GitHub runner IP\n\
+        # (HTTP 429, Retry-After 1800). Detection still runs from the local\n# vulnerability\
+        \ DB; only the remote POM lookups are disabled.\n./bin/trivy fs --scanners\
+        \ vuln,secret --severity HIGH,CRITICAL \\\n  --offline-scan --exit-code 0\
+        \ --no-progress application\n./bin/trivy config --severity HIGH,CRITICAL --exit-code\
+        \ 0 --no-progress infra\n"
   provision:
     runs-on: ubuntu-latest
     needs:
