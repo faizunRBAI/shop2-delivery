@@ -12,6 +12,11 @@
 # the Argo Rollouts NGINX traffic router against a stable Ingress; if that
 # wiring is lost the rollout still "succeeds" while sending 100% of traffic to
 # the stable version, which is a silent and very expensive failure.
+#
+# NOTE ON MATCHING: helm preserves YAML comments in rendered output, so every
+# assertion below runs against a COMMENT-STRIPPED copy. Matching raw text made
+# an earlier version of this script fail on a template comment that merely
+# DOCUMENTED an annotation. Assert on what Kubernetes would actually receive.
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 
@@ -25,8 +30,11 @@ FAIL=0
 pass() { printf '  \033[1;32m[PASS]\033[0m %s\n' "$*"; }
 bad()  { printf '  \033[1;31m[FAIL]\033[0m %s\n' "$*"; FAIL=1; }
 
+# Render, then drop full-line comments and trailing comments so assertions see
+# only effective YAML. (Values in this chart never contain a '#'.)
 render() {
-  helm template shopfast "$CHART" --set "deploymentStrategy=$1" "${COMMON[@]}"
+  helm template shopfast "$CHART" --set "deploymentStrategy=$1" "${COMMON[@]}" \
+    | sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*$/d'
 }
 
 count_kind() {
@@ -73,6 +81,7 @@ printf '%s' "$OUT" | grep -qE '^[[:space:]]+nginx:[[:space:]]*$' \
   && pass "uses the nginx traffic router" || bad "nginx traffic router missing"
 printf '%s' "$OUT" | grep -q 'stableIngress:' \
   && pass "references a stable ingress" || bad "stableIngress missing — the router cannot find the ingress to copy"
+
 # The stable ingress named by the router must actually be rendered by the chart.
 STABLE_ING="$(printf '%s' "$OUT" | grep 'stableIngress:' | head -1 | awk '{print $2}')"
 if [ -n "$STABLE_ING" ] && printf '%s' "$OUT" | grep -qE "^  name: ${STABLE_ING}$"; then
@@ -80,20 +89,41 @@ if [ -n "$STABLE_ING" ] && printf '%s' "$OUT" | grep -qE "^  name: ${STABLE_ING}
 else
   bad "stableIngress '${STABLE_ING:-?}' does not match any rendered resource name"
 fi
-# The Rollouts controller creates the canary ingress itself; the chart must not.
-CANARY_ING="$(printf '%s' "$OUT" | grep -c 'nginx.ingress.kubernetes.io/canary' || true)"
-[ "$CANARY_ING" -eq 0 ] \
-  && pass "chart does not render a canary ingress (owned by the controller)" \
-  || bad "chart renders a canary ingress — it would fight the Rollouts controller"
+
+# The Rollouts controller creates the canary ingress itself. If the chart also
+# rendered one, the two would fight over the same object forever.
+#
+# Assert on ANNOTATION KEYS in effective YAML: a canary annotation is a mapping
+# key, so it is followed by a colon at the start of a (whitespace-indented)
+# line. A bare mention anywhere else is not a rendered annotation.
+CANARY_ANNOTATIONS="$(printf '%s\n' "$OUT" \
+  | grep -cE '^[[:space:]]+nginx\.ingress\.kubernetes\.io/canary(-weight)?:' || true)"
+if [ "$CANARY_ANNOTATIONS" -eq 0 ]; then
+  pass "chart does not render a canary ingress (owned by the controller)"
+else
+  bad "chart renders ${CANARY_ANNOTATIONS} canary annotation(s) — it would fight the Rollouts controller"
+  printf '%s\n' "$OUT" | grep -nE '^[[:space:]]+nginx\.ingress\.kubernetes\.io/canary(-weight)?:' || true
+fi
+
+# Belt and braces: exactly one Ingress in canary mode (the stable one).
+ING_COUNT="$(count_kind "$OUT" Ingress)"
+[ "$ING_COUNT" -eq 1 ] \
+  && pass "renders exactly 1 Ingress in canary mode" \
+  || bad "expected exactly 1 Ingress in canary mode, got ${ING_COUNT}"
 
 echo "== ingress TLS contract"
 printf '%s' "$OUT" | grep -q 'cert-manager.io/cluster-issuer' \
   && pass "ingress requests a cert-manager certificate" || bad "cert-manager cluster-issuer annotation missing"
 printf '%s' "$OUT" | grep -qE '^[[:space:]]+ingressClassName: nginx$' \
   && pass "ingress targets the nginx IngressClass" || bad "ingressClassName is not nginx"
-printf '%s' "$OUT" | grep -q 'alb.ingress.kubernetes.io' \
-  && bad "ALB annotations still present — the AWS LB Controller is not installed" \
-  || pass "no stale ALB annotations remain"
+# ALB annotations would mean the AWS Load Balancer Controller is expected — it
+# is not installed in this cluster, so the ingress would never be served.
+if printf '%s\n' "$OUT" | grep -qE '^[[:space:]]+alb\.ingress\.kubernetes\.io/'; then
+  bad "ALB annotations still present — the AWS LB Controller is not installed"
+  printf '%s\n' "$OUT" | grep -nE '^[[:space:]]+alb\.ingress\.kubernetes\.io/' || true
+else
+  pass "no stale ALB annotations remain"
+fi
 
 echo "== immutable tag guard"
 if helm template shopfast "$CHART" \

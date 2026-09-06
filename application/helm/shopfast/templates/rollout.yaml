@@ -43,15 +43,13 @@ spec:
       maxSurge: {{ .Values.canary.maxSurge | quote }}
       maxUnavailable: {{ .Values.canary.maxUnavailable }}
       trafficRouting:
-        # NGINX traffic router. The controller COPIES the stable ingress named
-        # here into a managed "<name>-shopfast-canary" ingress annotated with
-        #   nginx.ingress.kubernetes.io/canary: "true"
-        #   nginx.ingress.kubernetes.io/canary-weight: "<step weight>"
-        # and updates that weight as the steps below progress. The chart must
-        # never render that canary ingress itself.
+        # NGINX traffic router: the Rollouts controller copies the stable
+        # ingress named below into its own managed canary ingress and drives
+        # the weight annotation on that copy as the steps progress. The chart
+        # must never render that copy itself, or the two would fight.
         #
-        # This replaces the previous ALB target-group weighting: an NLB cannot
-        # do L7 traffic splitting, so the split happens inside nginx.
+        # This replaces ALB target-group weighting: an NLB cannot do L7
+        # traffic splitting, so the split happens inside nginx.
         nginx:
           stableIngress: {{ include "shopfast.fullname" . }}
       steps:
