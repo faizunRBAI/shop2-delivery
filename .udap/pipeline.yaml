@@ -89,22 +89,19 @@ stages:
       - name: Terraform validate
         working-directory: infra
         run: terraform validate
-      - name: Create the hosted zone first and print the nameservers
-        working-directory: infra
-        run: |
-          echo "Creating the Route 53 zone before anything that waits on DNS."
-          terraform apply -input=false -auto-approve -target=aws_route53_zone.platform
-          echo "::notice title=cPanel DNS delegation::Add these as NS records for the 'shop2' subdomain in cPanel."
-          terraform output -json route53_nameservers
       - name: Terraform apply
         working-directory: infra
-        run: terraform apply -input=false -auto-approve
+        run: |
+          # No DNS/ACM resources exist any more: TLS is issued in-cluster by
+          # cert-manager and DNS records are maintained by hand in cPanel, so
+          # nothing in this apply blocks on an external delegation.
+          terraform apply -input=false -auto-approve
       - name: Show the provisioned endpoints
         working-directory: infra
         run: |
           terraform output -raw eks_cluster_name && echo
           terraform output -raw ecr_repository_url && echo
-          terraform output -json route53_nameservers
+          terraform output -raw base_domain && echo
 
   - id: configure
     kind: configure
@@ -150,7 +147,7 @@ stages:
           echo "cluster=$(terraform output -raw eks_cluster_name)" >> "$GITHUB_OUTPUT"
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name "${{ steps.tf.outputs.cluster }}" --region us-east-1
-      - name: Bootstrap the AWS LB Controller, Argo CD and the App-of-Apps
+      - name: Bootstrap ingress-nginx, cert-manager, Argo CD and the App-of-Apps
         run: bash gitops/bootstrap/bootstrap.sh
         env:
           CLUSTER_NAME: ${{ steps.tf.outputs.cluster }}
@@ -191,8 +188,18 @@ stages:
           echo "cluster=$(terraform output -raw eks_cluster_name)" >> "$GITHUB_OUTPUT"
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name "${{ steps.tf.outputs.cluster }}" --region us-east-1
-      - name: Verify the real AWS, EKS and Argo CD state
+      - name: Verify the real AWS, EKS, cert-manager and Argo CD state
         run: bash gitops/bootstrap/verify.sh
+      - name: Print the CNAME target for cPanel
+        run: |
+          NLB="$(kubectl -n ingress-nginx get svc ingress-nginx-controller \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+          if [ -n "$NLB" ]; then
+            echo "::notice title=cPanel CNAME target::Point argocd.shop2 / grafana.shop2 / shopfast.shop2 at ${NLB}"
+            echo "Load balancer hostname: ${NLB}"
+          else
+            echo "::warning title=No load balancer::the ingress-nginx Service has no hostname yet"
+          fi
 
 destroy:
   env:
@@ -223,21 +230,22 @@ destroy:
     - name: Remove Kubernetes-created load balancers before destroying the VPC
       working-directory: infra
       run: |
-        # ALBs and their security groups are created by the AWS Load Balancer
-        # Controller and are NOT in terraform state. Left behind, they hold ENIs
-        # in the subnets and `terraform destroy` hangs on the VPC for ~20 minutes
-        # before failing. Deleting the ingresses first lets the controller clean
-        # up its own resources.
+        # The NLB is created by the in-tree AWS cloud provider from the
+        # ingress-nginx Service and is NOT in terraform state. Left behind, it
+        # holds ENIs in the subnets and `terraform destroy` hangs on the VPC
+        # for ~20 minutes before failing. Deleting the Service first makes the
+        # cloud provider tear its own load balancer down.
         CLUSTER="$(terraform output -raw eks_cluster_name 2>/dev/null || true)"
         if [ -z "$CLUSTER" ]; then
           echo "No cluster in state — nothing to clean up."
           exit 0
         fi
         aws eks update-kubeconfig --name "$CLUSTER" --region us-east-1 || exit 0
-        kubectl delete ingress --all --all-namespaces --ignore-not-found --timeout=5m || true
         kubectl -n argocd delete applications --all --ignore-not-found --timeout=5m || true
-        echo "Waiting for the load balancer controller to release its ENIs..."
-        sleep 90
+        kubectl delete ingress --all --all-namespaces --ignore-not-found --timeout=5m || true
+        kubectl -n ingress-nginx delete svc ingress-nginx-controller --ignore-not-found --timeout=5m || true
+        echo "Waiting for the cloud provider to release the load balancer ENIs..."
+        sleep 120
     - name: Terraform destroy
       working-directory: infra
       run: terraform destroy -input=false -auto-approve

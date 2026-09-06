@@ -1,0 +1,50 @@
+# ---------------------------------------------------------------------------
+# cert-manager — issues and renews the platform's Let's Encrypt certificates.
+#
+# SYNC WAVE -1: after ingress-nginx (which provides the IngressClass its
+# HTTP-01 solver needs) and before every application Ingress that carries a
+# cert-manager.io/cluster-issuer annotation.
+#
+# The ClusterIssuers themselves live in a SEPARATE Application (wave 0) because
+# they are instances of CRDs this chart installs — applying them in the same
+# wave would race the CRD establishment and fail with "no matches for kind
+# ClusterIssuer".
+# ---------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    - repoURL: https://charts.jetstack.io
+      chart: cert-manager
+      targetRevision: v1.16.2
+      helm:
+        releaseName: cert-manager
+        valueFiles:
+          - $values/gitops/platform/cert-manager/values.yaml
+    - repoURL: PLACEHOLDER_REPO_URL
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m

@@ -7,6 +7,11 @@
 # This renders the chart in all three modes and asserts the exact workload kind
 # produced. A regression in the template guards fails the build here, before it
 # can reach a cluster.
+#
+# It also asserts the TRAFFIC ROUTING contract. Canary weights are applied by
+# the Argo Rollouts NGINX traffic router against a stable Ingress; if that
+# wiring is lost the rollout still "succeeds" while sending 100% of traffic to
+# the stable version, which is a silent and very expensive failure.
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 
@@ -57,6 +62,38 @@ printf '%s' "$OUT" | grep -q 'canary:' \
   && pass "uses the canary strategy"    || bad "canary strategy block missing"
 printf '%s' "$OUT" | grep -q 'setWeight' \
   && pass "defines traffic weight steps" || bad "canary steps missing"
+
+echo "== canary traffic routing (nginx)"
+# Without a trafficRouting block Argo Rollouts silently degrades to replica-
+# count-based canarying: the steps still run, but no traffic is actually
+# split. Assert the nginx router and its stable ingress reference explicitly.
+printf '%s' "$OUT" | grep -q 'trafficRouting:' \
+  && pass "declares trafficRouting" || bad "trafficRouting block missing — weights would be ignored"
+printf '%s' "$OUT" | grep -qE '^[[:space:]]+nginx:[[:space:]]*$' \
+  && pass "uses the nginx traffic router" || bad "nginx traffic router missing"
+printf '%s' "$OUT" | grep -q 'stableIngress:' \
+  && pass "references a stable ingress" || bad "stableIngress missing — the router cannot find the ingress to copy"
+# The stable ingress named by the router must actually be rendered by the chart.
+STABLE_ING="$(printf '%s' "$OUT" | grep 'stableIngress:' | head -1 | awk '{print $2}')"
+if [ -n "$STABLE_ING" ] && printf '%s' "$OUT" | grep -qE "^  name: ${STABLE_ING}$"; then
+  pass "stable ingress '${STABLE_ING}' is rendered by the chart"
+else
+  bad "stableIngress '${STABLE_ING:-?}' does not match any rendered resource name"
+fi
+# The Rollouts controller creates the canary ingress itself; the chart must not.
+CANARY_ING="$(printf '%s' "$OUT" | grep -c 'nginx.ingress.kubernetes.io/canary' || true)"
+[ "$CANARY_ING" -eq 0 ] \
+  && pass "chart does not render a canary ingress (owned by the controller)" \
+  || bad "chart renders a canary ingress — it would fight the Rollouts controller"
+
+echo "== ingress TLS contract"
+printf '%s' "$OUT" | grep -q 'cert-manager.io/cluster-issuer' \
+  && pass "ingress requests a cert-manager certificate" || bad "cert-manager cluster-issuer annotation missing"
+printf '%s' "$OUT" | grep -qE '^[[:space:]]+ingressClassName: nginx$' \
+  && pass "ingress targets the nginx IngressClass" || bad "ingressClassName is not nginx"
+printf '%s' "$OUT" | grep -q 'alb.ingress.kubernetes.io' \
+  && bad "ALB annotations still present — the AWS LB Controller is not installed" \
+  || pass "no stale ALB annotations remain"
 
 echo "== immutable tag guard"
 if helm template shopfast "$CHART" \

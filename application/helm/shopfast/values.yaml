@@ -40,15 +40,18 @@ service:
 
 ingress:
   enabled: true
-  # Public hostname served through the ALB provisioned by the AWS Load
-  # Balancer Controller. TLS terminates at the ALB using the ACM certificate.
+  # Public hostname served by ingress-nginx behind the platform NLB.
+  # TLS terminates at nginx on a cert-manager-issued Let's Encrypt certificate.
   host: shopfast.shop2.royalbengal.xyz
   # Blue/Green preview hostname. Only used when deploymentStrategy=bluegreen.
+  # NOTE: this hostname needs its OWN cPanel CNAME to the NLB, and its own
+  # certificate — HTTP-01 cannot issue wildcards.
   previewHost: shopfast-preview.shop2.royalbengal.xyz
-  ingressClassName: alb
-  # Wildcard ACM cert ARN, injected by the bootstrap into the GitOps values.
-  certificateArn: ""
-  group: shop2-delivery
+  ingressClassName: nginx
+  # ACME issuer used by cert-manager. Switch to letsencrypt-staging while
+  # debugging: production Let's Encrypt allows only 5 duplicate certificates
+  # per week and exhausting that locks the hostname out for 7 days.
+  clusterIssuer: letsencrypt-prod
   annotations: {}
 
 resources:
@@ -105,7 +108,9 @@ blueGreen:
 
 # --- Canary settings -------------------------------------------------------
 canary:
-  # Traffic weight steps. Each pause is manual unless a duration is given.
+  # Traffic weight steps, applied by the Argo Rollouts NGINX traffic router as
+  # nginx.ingress.kubernetes.io/canary-weight on a controller-managed copy of
+  # the stable ingress. Each pause is manual unless a duration is given.
   steps:
     - setWeight: 20
     - pause: { duration: 60s }

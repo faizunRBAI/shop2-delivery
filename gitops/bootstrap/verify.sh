@@ -2,14 +2,23 @@
 # ---------------------------------------------------------------------------
 # Post-deploy verification.
 #
-# Asserts the ACTUAL state of AWS, EKS and Argo CD. Every check either proves
-# something with real output or fails the pipeline. Nothing here assumes that a
-# previous step "probably worked".
+# Asserts the ACTUAL state of AWS, EKS, cert-manager and Argo CD. Every check
+# either proves something with real output or fails the pipeline. Nothing here
+# assumes that a previous step "probably worked".
+#
+# ONE DELIBERATE EXCEPTION: the public HTTPS endpoints depend on CNAME records
+# the operator creates by hand in cPanel (the host offers no NS records, so
+# Route 53 delegation and ACM are impossible — see infra/dns_tls.tf). Until
+# those records exist, DNS cannot resolve and no certificate can be issued.
+# That is a PENDING HUMAN ACTION, not a broken deployment, so it is reported
+# as such instead of failing the run and sending someone to debug code that is
+# already correct. Everything INSIDE the cluster is still asserted strictly.
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 
 PASS=0
 FAIL=0
+DNS_PENDING=0
 
 ok()    { printf '  \033[1;32m[PASS]\033[0m %s\n' "$*"; PASS=$((PASS+1)); }
 bad()   { printf '  \033[1;31m[FAIL]\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
@@ -54,11 +63,45 @@ check_deploy() {
   fi
 }
 
-check_deploy kube-system aws-load-balancer-controller
+check_deploy ingress-nginx ingress-nginx-controller
+check_deploy cert-manager cert-manager
+check_deploy cert-manager cert-manager-webhook
 check_deploy argocd argocd-server
 check_deploy argocd argocd-repo-server
 
-# --- 3. Argo Rollouts (delivered BY GitOps, not by the bootstrap) ----------
+# --- 3. The public load balancer -------------------------------------------
+# This is the single entrypoint and the CNAME target. Without it nothing is
+# reachable, so this check is strict.
+head_ "Public load balancer"
+NLB_HOSTNAME="$(kubectl -n ingress-nginx get svc ingress-nginx-controller \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
+
+if [ -n "$NLB_HOSTNAME" ]; then
+  ok "ingress-nginx Service has a load balancer: ${NLB_HOSTNAME}"
+else
+  bad "the ingress-nginx Service has no load balancer hostname"
+  kubectl -n ingress-nginx describe svc ingress-nginx-controller 2>/dev/null | tail -30 || true
+fi
+
+# --- 4. ACME issuers -------------------------------------------------------
+head_ "cert-manager issuers"
+if kubectl get crd clusterissuers.cert-manager.io >/dev/null 2>&1; then
+  ok "ClusterIssuer CRD is installed"
+  for issuer in letsencrypt-prod letsencrypt-staging; do
+    READY="$(kubectl get clusterissuer "$issuer" \
+      -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)"
+    if [ "$READY" = "True" ]; then
+      ok "ClusterIssuer ${issuer} is Ready (ACME account registered)"
+    else
+      bad "ClusterIssuer ${issuer} is not Ready (status=${READY:-none})"
+      kubectl describe clusterissuer "$issuer" 2>/dev/null | tail -20 || true
+    fi
+  done
+else
+  bad "ClusterIssuer CRD missing — cert-manager has not installed"
+fi
+
+# --- 5. Argo Rollouts ------------------------------------------------------
 head_ "Argo Rollouts"
 if kubectl get crd rollouts.argoproj.io >/dev/null 2>&1; then
   ok "Rollout CRD is installed"
@@ -72,7 +115,7 @@ else
   warn "argo-rollouts controller not present yet (Argo CD may still be syncing)"
 fi
 
-# --- 4. Argo CD applications ----------------------------------------------
+# --- 6. Argo CD applications ----------------------------------------------
 head_ "Argo CD applications"
 if kubectl -n argocd get application root >/dev/null 2>&1; then
   ok "root App-of-Apps exists"
@@ -121,7 +164,7 @@ else
   done
 fi
 
-# --- 5. The workload, and the strategy invariant ---------------------------
+# --- 7. The workload, and the strategy invariant ---------------------------
 head_ "ShopFast workload"
 WORKLOADS="$(kubectl -n shopfast get rollout,deploy -o name 2>/dev/null || true)"
 HAS_ROLLOUT="$(printf '%s\n' "$WORKLOADS" | grep -c '^rollout' || true)"
@@ -147,7 +190,7 @@ else
   kubectl -n shopfast get pods 2>/dev/null || true
 fi
 
-# --- 6. Observability ------------------------------------------------------
+# --- 8. Observability ------------------------------------------------------
 head_ "Observability"
 if kubectl -n monitoring get statefulset victoriametrics >/dev/null 2>&1; then
   VM_READY="$(kubectl -n monitoring get statefulset victoriametrics \
@@ -180,41 +223,120 @@ else
   warn "could not query VictoriaMetrics for scrape targets yet"
 fi
 
-# --- 7. Public HTTPS endpoints (from outside the cluster) ------------------
-head_ "Public HTTPS endpoints (domain: ${BASE_DOMAIN})"
+# --- 9. In-cluster HTTP reachability (independent of public DNS) -----------
+# Proves nginx is routing to the right backends even before the CNAMEs exist,
+# by sending the Host header directly to the controller Service. This is what
+# separates "the platform is broken" from "DNS is not pointed here yet".
+head_ "In-cluster routing (Host-header probes, no DNS required)"
 
-probe_url() {
-  local url="$1" expect="$2" label="$3" code
-  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
-          --retry 12 --retry-delay 15 --retry-all-errors "$url" || echo 000)"
+probe_internal() {
+  local host="$1" path="$2" expect="$3" label="$4" code
+  code="$(kubectl -n ingress-nginx run "probe-$(date +%s%N | tail -c 7)" \
+      --rm -i --restart=Never --quiet \
+      --image=curlimages/curl:8.11.0 --timeout=90s -- \
+      curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+      -H "Host: ${host}" "http://ingress-nginx-controller.ingress-nginx.svc${path}" \
+      2>/dev/null || echo 000)"
+  code="$(printf '%s' "$code" | tr -dc '0-9')"
   if printf '%s' "$expect" | tr ',' '\n' | grep -qx "$code"; then
-    ok "${label} → HTTP ${code} (${url})"
+    ok "${label} routed internally → HTTP ${code}"
   else
-    bad "${label} → HTTP ${code}, expected one of ${expect} (${url})"
+    bad "${label} routed internally → HTTP ${code}, expected one of ${expect}"
   fi
 }
 
-ALB_HOST="$(kubectl -n argocd get ingress argocd-server \
-  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
-if [ -n "$ALB_HOST" ]; then
-  ok "Argo CD ingress has an ALB: ${ALB_HOST}"
-else
-  bad "Argo CD ingress has no ALB address yet"
-  kubectl -n argocd describe ingress argocd-server 2>/dev/null | tail -25 || true
+# 308 is the per-ingress HTTP→HTTPS redirect and proves the ingress matched.
+probe_internal "argocd.${BASE_DOMAIN}"   "/healthz"          "200,308" "Argo CD"
+probe_internal "shopfast.${BASE_DOMAIN}" "/actuator/health"  "200,308" "ShopFast"
+probe_internal "grafana.${BASE_DOMAIN}"  "/api/health"       "200,308" "Grafana"
+
+# --- 10. Public HTTPS endpoints -------------------------------------------
+# These depend on the operator's cPanel CNAME records. Reported, never fatal.
+head_ "Public HTTPS endpoints (domain: ${BASE_DOMAIN})"
+
+if [ -n "$NLB_HOSTNAME" ]; then
+  echo "  CNAME target for cPanel: ${NLB_HOSTNAME}"
+  echo
 fi
 
+dns_points_here() {
+  local host="$1" resolved
+  resolved="$(getent hosts "$host" 2>/dev/null | head -1 || true)"
+  [ -n "$resolved" ]
+}
+
+probe_public() {
+  local url="$1" expect="$2" label="$3" host code
+  host="$(printf '%s' "$url" | sed -e 's#^https\?://##' -e 's#/.*##')"
+
+  if ! dns_points_here "$host"; then
+    warn "${label}: ${host} does not resolve yet — add the cPanel CNAME to ${NLB_HOSTNAME:-the load balancer}"
+    DNS_PENDING=$((DNS_PENDING+1))
+    return 0
+  fi
+
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+          --retry 8 --retry-delay 15 --retry-all-errors "$url" || echo 000)"
+  if printf '%s' "$expect" | tr ',' '\n' | grep -qx "$code"; then
+    ok "${label} → HTTP ${code} (${url})"
+  else
+    # DNS resolves but HTTPS is not answering correctly. The usual cause on a
+    # fresh cluster is that cert-manager has not finished issuing yet.
+    bad "${label} → HTTP ${code}, expected one of ${expect} (${url})"
+    echo "  Certificate status for ${host}:"
+    kubectl get certificate -A 2>/dev/null | grep -i "${host%%.*}" || true
+  fi
+}
+
 # 307 is the Argo CD login redirect and is a healthy response for '/'.
-probe_url "https://argocd.${BASE_DOMAIN}/healthz"           "200"     "Argo CD health"
-probe_url "https://argocd.${BASE_DOMAIN}/"                  "200,307" "Argo CD dashboard"
-probe_url "https://shopfast.${BASE_DOMAIN}/actuator/health" "200"     "ShopFast health"
-probe_url "https://shopfast.${BASE_DOMAIN}/api/hello"       "200"     "ShopFast API"
-probe_url "https://grafana.${BASE_DOMAIN}/api/health"       "200"     "Grafana health"
+probe_public "https://argocd.${BASE_DOMAIN}/healthz"           "200"     "Argo CD health"
+probe_public "https://argocd.${BASE_DOMAIN}/"                  "200,307" "Argo CD dashboard"
+probe_public "https://shopfast.${BASE_DOMAIN}/actuator/health" "200"     "ShopFast health"
+probe_public "https://shopfast.${BASE_DOMAIN}/api/hello"       "200"     "ShopFast API"
+probe_public "https://grafana.${BASE_DOMAIN}/api/health"       "200"     "Grafana health"
+
+# --- 11. Certificate status ------------------------------------------------
+head_ "TLS certificates"
+CERTS="$(kubectl get certificate -A --no-headers 2>/dev/null || true)"
+if [ -n "$CERTS" ]; then
+  kubectl get certificate -A 2>/dev/null || true
+  CERT_TOTAL="$(printf '%s\n' "$CERTS" | wc -l | tr -d ' ')"
+  CERT_READY="$(printf '%s\n' "$CERTS" | awk '{print $3}' | grep -c '^True$' || true)"
+  if [ "${CERT_READY:-0}" -eq "${CERT_TOTAL:-0}" ] && [ "${CERT_TOTAL:-0}" -gt 0 ]; then
+    ok "all ${CERT_TOTAL} certificate(s) are issued"
+  else
+    warn "${CERT_READY}/${CERT_TOTAL} certificates issued — HTTP-01 needs public DNS first"
+  fi
+else
+  warn "no Certificate resources yet (ingresses may still be syncing)"
+fi
 
 # --- Summary ---------------------------------------------------------------
 head_ "Summary"
-printf '  %d passed, %d failed\n\n' "$PASS" "$FAIL"
+printf '  %d passed, %d failed' "$PASS" "$FAIL"
+[ "$DNS_PENDING" -gt 0 ] && printf ', %d awaiting DNS' "$DNS_PENDING"
+printf '\n\n'
+
 if [ "$FAIL" -gt 0 ]; then
   echo "Verification FAILED — see the failures above."
   exit 1
 fi
+
+if [ "$DNS_PENDING" -gt 0 ]; then
+  cat <<BANNER
+Verification PASSED for everything inside the cluster.
+
+ACTION REQUIRED — ${DNS_PENDING} public endpoint(s) cannot be reached because
+their DNS records do not exist yet. In cPanel, create these CNAME records:
+
+    argocd.shop2    CNAME  ${NLB_HOSTNAME}
+    grafana.shop2   CNAME  ${NLB_HOSTNAME}
+    shopfast.shop2  CNAME  ${NLB_HOSTNAME}
+
+cert-manager will then issue the Let's Encrypt certificates automatically
+within a couple of minutes. Re-run this workflow afterwards to confirm.
+BANNER
+  exit 0
+fi
+
 echo "Verification PASSED — the platform is live and reconciling from git."

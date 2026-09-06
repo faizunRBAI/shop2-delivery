@@ -1,0 +1,56 @@
+# ---------------------------------------------------------------------------
+# ACME ClusterIssuers.
+#
+# Two issuers are defined deliberately:
+#
+#   letsencrypt-staging  untrusted certs, effectively unlimited issuance.
+#                        Use this while iterating on ingress/DNS. A browser
+#                        will warn, but "cert issued" proves the whole
+#                        HTTP-01 path works end to end.
+#
+#   letsencrypt-prod     real, browser-trusted certs. Rate limited to
+#                        50 certificates per registered domain per week and
+#                        5 DUPLICATE certificates per week. Exhausting the
+#                        duplicate limit locks a hostname out for a week, so
+#                        never loop on prod while debugging.
+#
+# Both use the HTTP-01 solver on ingressClass nginx: cert-manager creates a
+# temporary Ingress + Pod answering /.well-known/acme-challenge/<token> over
+# PLAIN HTTP on port 80. This is why the controller must not force an HTTPS
+# redirect globally (see ingress-nginx/values.yaml).
+#
+# This is a SEPARATE Argo Application from the cert-manager chart because a
+# ClusterIssuer is a CRD instance: it cannot be applied until cert-manager's
+# CRDs are established. The sync-wave on the Application enforces that order.
+# ---------------------------------------------------------------------------
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    # Expiry-notice address only. Not a secret, and not used for auth — the
+    # ACME account is identified by the private key in the Secret below.
+    email: devops@royalbengal.xyz
+    privateKeySecretRef:
+      name: letsencrypt-staging-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: devops@royalbengal.xyz
+    privateKeySecretRef:
+      name: letsencrypt-prod-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: nginx

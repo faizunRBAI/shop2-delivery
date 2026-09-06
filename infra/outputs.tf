@@ -24,7 +24,7 @@ output "vpc_id" {
 }
 
 output "public_subnet_ids" {
-  description = "Public subnets used by internet-facing load balancers."
+  description = "Public subnets used by the internet-facing NLB."
   value       = aws_subnet.public[*].id
 }
 
@@ -33,28 +33,18 @@ output "private_subnet_ids" {
   value       = aws_subnet.private[*].id
 }
 
-output "alb_controller_role_arn" {
-  description = "IRSA role ARN for the AWS Load Balancer Controller."
-  value       = aws_iam_role.alb_controller.arn
-}
-
-output "acm_certificate_arn" {
-  description = "Validated wildcard ACM certificate ARN used by the ALB listeners."
-  value       = aws_acm_certificate_validation.platform.certificate_arn
-}
-
-output "route53_zone_id" {
-  description = "Hosted zone id for the delegated platform subdomain."
-  value       = aws_route53_zone.platform.zone_id
-}
-
-output "route53_nameservers" {
-  description = "Add these as NS records for the 'shop2' subdomain in cPanel."
-  value       = aws_route53_zone.platform.name_servers
-}
+# ---------------------------------------------------------------------------
+# There is deliberately no acm_certificate_arn / route53_zone_id /
+# route53_nameservers output. TLS is issued in-cluster by cert-manager and DNS
+# is maintained by hand in cPanel; see infra/dns_tls.tf for the reasoning.
+#
+# The public entrypoint is the NLB hostname on the ingress-nginx Service, which
+# only exists once Argo CD has synced the controller. The verify stage reads it
+# with kubectl and prints it as the CNAME target.
+# ---------------------------------------------------------------------------
 
 output "base_domain" {
-  description = "Delegated base domain for platform endpoints."
+  description = "Base domain for platform endpoints (records are managed in cPanel)."
   value       = var.base_domain
 }
 

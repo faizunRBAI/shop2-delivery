@@ -1,11 +1,19 @@
 # ---------------------------------------------------------------------------
 # Argo CD configuration (upstream argo-cd chart).
 #
-# The dashboard is published at https://argocd.shop2.royalbengal.xyz through an
-# internet-facing ALB. TLS terminates at the ALB with the wildcard ACM
-# certificate, so the Argo CD server itself runs in --insecure mode: that is
-# the documented ALB pattern and it means the server speaks plain HTTP only
-# INSIDE the cluster, never on the wire. Port 80 redirects to 443.
+# The dashboard is published at https://argocd.shop2.royalbengal.xyz through
+# ingress-nginx behind the platform NLB. TLS terminates at nginx on a
+# cert-manager-issued Let's Encrypt certificate, so the Argo CD server itself
+# runs in --insecure mode: it speaks plain HTTP only INSIDE the cluster, never
+# on the wire. Port 80 redirects to 443 at the ingress.
+#
+# VERIFIED against argo-cd chart 7.7.11 with `helm template`:
+#   * server.ingress.tls=true alone emits the tls block with
+#     secretName: argocd-server-tls  -> do NOT also set extraTls, that
+#     produces a duplicate TLS entry.
+#   * configs.params."server.insecure"=true switches the ingress backend port
+#     from 443 to 80. Setting insecure WITHOUT that would make nginx speak
+#     plain HTTP to a TLS port and every request would 502.
 #
 # No kubectl port-forward is involved anywhere in this design.
 # ---------------------------------------------------------------------------
@@ -15,7 +23,8 @@ global:
 
 configs:
   params:
-    # TLS is terminated by the ALB in front; see the note above.
+    # TLS is terminated by ingress-nginx in front; see the note above.
+    # This also makes the chart target the server's port 80.
     server.insecure: true
     # Argo CD reconciles the cluster; it must not be a Rollout controller.
     application.namespaces: "argocd"
@@ -66,20 +75,22 @@ server:
 
   ingress:
     enabled: true
-    ingressClassName: alb
+    ingressClassName: nginx
     hostname: argocd.shop2.royalbengal.xyz
     annotations:
-      alb.ingress.kubernetes.io/scheme: internet-facing
-      alb.ingress.kubernetes.io/target-type: ip
-      alb.ingress.kubernetes.io/group.name: shop2-delivery
-      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
-      alb.ingress.kubernetes.io/ssl-redirect: "443"
-      alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
-      alb.ingress.kubernetes.io/backend-protocol: HTTP
-      alb.ingress.kubernetes.io/healthcheck-path: /healthz
-      alb.ingress.kubernetes.io/success-codes: "200"
-    # The ALB serves HTTP internally to the server (server.insecure=true).
-    tls: false
+      # cert-manager issues and renews the certificate for this hostname into
+      # the Secret named in the chart-generated tls block (argocd-server-tls).
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+      # Per-ingress redirect (NOT global): ingress-nginx exempts the ACME
+      # challenge path from this, so HTTP-01 renewals continue to work.
+      nginx.ingress.kubernetes.io/ssl-redirect: "true"
+      # server.insecure=true means the pod serves plain HTTP in-cluster.
+      nginx.ingress.kubernetes.io/backend-protocol: HTTP
+      # The Argo CD UI streams application events over long-lived responses.
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+      nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
+    # Emits: tls: [{hosts: [<domain>], secretName: argocd-server-tls}]
+    tls: true
 
   resources:
     requests:

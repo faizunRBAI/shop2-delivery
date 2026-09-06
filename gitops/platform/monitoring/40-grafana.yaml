@@ -1,11 +1,14 @@
 # ---------------------------------------------------------------------------
-# Grafana, published at https://grafana.shop2.royalbengal.xyz via the shared
-# ALB. Datasource and dashboards are PROVISIONED from ConfigMaps, so the
-# dashboards are version-controlled in this repo rather than clicked into a
-# database that no one can rebuild.
+# Grafana, published at https://grafana.shop2.royalbengal.xyz through
+# ingress-nginx behind the platform NLB. Datasource and dashboards are
+# PROVISIONED from ConfigMaps, so the dashboards are version-controlled in this
+# repo rather than clicked into a database that no one can rebuild.
 #
 # The admin password comes from the grafana-admin Secret, created at bootstrap
 # from the GRAFANA_ADMIN_PASSWORD GitHub secret — never from this file.
+#
+# TLS is issued for this hostname by cert-manager from Let's Encrypt over the
+# HTTP-01 challenge; there is no ACM certificate anywhere in this platform.
 #
 # NOTE on mount paths: dashboards are mounted at /etc/grafana/dashboards, NOT
 # under /var/lib/grafana, because the writable emptyDir mounted at
@@ -61,15 +64,17 @@ metadata:
   name: grafana
   namespace: monitoring
   annotations:
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/group.name: shop2-delivery
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
-    alb.ingress.kubernetes.io/ssl-redirect: "443"
-    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
-    alb.ingress.kubernetes.io/healthcheck-path: /api/health
+    # cert-manager issues and renews the certificate into grafana-tls.
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    # Per-ingress redirect (NOT global): ingress-nginx exempts the ACME
+    # challenge path, so HTTP-01 issuance and renewal keep working.
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
 spec:
-  ingressClassName: alb
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - grafana.shop2.royalbengal.xyz
+      secretName: grafana-tls
   rules:
     - host: grafana.shop2.royalbengal.xyz
       http:

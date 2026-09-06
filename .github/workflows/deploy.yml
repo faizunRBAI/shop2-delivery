@@ -85,27 +85,23 @@ jobs:
     - name: Terraform validate
       run: terraform validate
       working-directory: infra
-    - name: Create the hosted zone first and print the nameservers
-      run: 'echo "Creating the Route 53 zone before anything that waits on DNS."
+    - name: Terraform apply
+      run: '# No DNS/ACM resources exist any more: TLS is issued in-cluster by
 
-        terraform apply -input=false -auto-approve -target=aws_route53_zone.platform
+        # cert-manager and DNS records are maintained by hand in cPanel, so
 
-        echo "::notice title=cPanel DNS delegation::Add these as NS records for the
-        ''shop2'' subdomain in cPanel."
+        # nothing in this apply blocks on an external delegation.
 
-        terraform output -json route53_nameservers
+        terraform apply -input=false -auto-approve
 
         '
-      working-directory: infra
-    - name: Terraform apply
-      run: terraform apply -input=false -auto-approve
       working-directory: infra
     - name: Show the provisioned endpoints
       run: 'terraform output -raw eks_cluster_name && echo
 
         terraform output -raw ecr_repository_url && echo
 
-        terraform output -json route53_nameservers
+        terraform output -raw base_domain && echo
 
         '
       working-directory: infra
@@ -156,7 +152,7 @@ jobs:
     - name: Update kubeconfig
       run: aws eks update-kubeconfig --name "${{ steps.tf.outputs.cluster }}" --region
         us-east-1
-    - name: Bootstrap the AWS LB Controller, Argo CD and the App-of-Apps
+    - name: Bootstrap ingress-nginx, cert-manager, Argo CD and the App-of-Apps
       run: bash gitops/bootstrap/bootstrap.sh
       env:
         CLUSTER_NAME: ${{ steps.tf.outputs.cluster }}
@@ -198,5 +194,12 @@ jobs:
     - name: Update kubeconfig
       run: aws eks update-kubeconfig --name "${{ steps.tf.outputs.cluster }}" --region
         us-east-1
-    - name: Verify the real AWS, EKS and Argo CD state
+    - name: Verify the real AWS, EKS, cert-manager and Argo CD state
       run: bash gitops/bootstrap/verify.sh
+    - name: Print the CNAME target for cPanel
+      run: "NLB=\"$(kubectl -n ingress-nginx get svc ingress-nginx-controller \\\n\
+        \  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null ||\
+        \ true)\"\nif [ -n \"$NLB\" ]; then\n  echo \"::notice title=cPanel CNAME\
+        \ target::Point argocd.shop2 / grafana.shop2 / shopfast.shop2 at ${NLB}\"\n\
+        \  echo \"Load balancer hostname: ${NLB}\"\nelse\n  echo \"::warning title=No\
+        \ load balancer::the ingress-nginx Service has no hostname yet\"\nfi\n"

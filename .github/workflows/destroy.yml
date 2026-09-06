@@ -31,18 +31,19 @@ jobs:
         \ }}/terraform.tfstate\" \\\n  -backend-config=\"region=us-east-1\"\n"
       working-directory: infra
     - name: Remove Kubernetes-created load balancers before destroying the VPC
-      run: "# ALBs and their security groups are created by the AWS Load Balancer\n\
-        # Controller and are NOT in terraform state. Left behind, they hold ENIs\n\
-        # in the subnets and `terraform destroy` hangs on the VPC for ~20 minutes\n\
-        # before failing. Deleting the ingresses first lets the controller clean\n\
-        # up its own resources.\nCLUSTER=\"$(terraform output -raw eks_cluster_name\
+      run: "# The NLB is created by the in-tree AWS cloud provider from the\n# ingress-nginx\
+        \ Service and is NOT in terraform state. Left behind, it\n# holds ENIs in\
+        \ the subnets and `terraform destroy` hangs on the VPC\n# for ~20 minutes\
+        \ before failing. Deleting the Service first makes the\n# cloud provider tear\
+        \ its own load balancer down.\nCLUSTER=\"$(terraform output -raw eks_cluster_name\
         \ 2>/dev/null || true)\"\nif [ -z \"$CLUSTER\" ]; then\n  echo \"No cluster\
         \ in state \u2014 nothing to clean up.\"\n  exit 0\nfi\naws eks update-kubeconfig\
-        \ --name \"$CLUSTER\" --region us-east-1 || exit 0\nkubectl delete ingress\
-        \ --all --all-namespaces --ignore-not-found --timeout=5m || true\nkubectl\
-        \ -n argocd delete applications --all --ignore-not-found --timeout=5m || true\n\
-        echo \"Waiting for the load balancer controller to release its ENIs...\"\n\
-        sleep 90\n"
+        \ --name \"$CLUSTER\" --region us-east-1 || exit 0\nkubectl -n argocd delete\
+        \ applications --all --ignore-not-found --timeout=5m || true\nkubectl delete\
+        \ ingress --all --all-namespaces --ignore-not-found --timeout=5m || true\n\
+        kubectl -n ingress-nginx delete svc ingress-nginx-controller --ignore-not-found\
+        \ --timeout=5m || true\necho \"Waiting for the cloud provider to release the\
+        \ load balancer ENIs...\"\nsleep 120\n"
       working-directory: infra
     - name: Terraform destroy
       run: terraform destroy -input=false -auto-approve

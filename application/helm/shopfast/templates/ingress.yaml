@@ -1,12 +1,22 @@
 {{- include "shopfast.validateStrategy" . -}}
 {{- if .Values.ingress.enabled }}
 {{/*
-Public ingress served by an ALB provisioned by the AWS Load Balancer
-Controller. TLS terminates at the ALB with the wildcard ACM certificate;
-port 80 is redirected to 443 so nothing is ever served in clear text.
+Public ingress served by ingress-nginx behind the platform NLB.
 
-For canary rollouts the controller also owns the traffic weights on this
-ingress (spec.strategy.canary.trafficRouting.alb references it by name).
+TLS: cert-manager watches the cert-manager.io/cluster-issuer annotation plus
+the spec.tls block, obtains a Let's Encrypt certificate over HTTP-01 and writes
+it into the named Secret. Nothing here references an ACM ARN.
+
+ssl-redirect is set PER INGRESS rather than globally in the controller config:
+ingress-nginx exempts the /.well-known/acme-challenge/ path from a per-ingress
+redirect, so renewals keep working, whereas a global force-ssl-redirect would
+break the challenge and no certificate would ever issue.
+
+CANARY: this is the STABLE ingress. When deploymentStrategy=canary, the Argo
+Rollouts nginx traffic router COPIES this ingress into a second, managed
+"-canary" ingress carrying nginx.ingress.kubernetes.io/canary: "true" and the
+current canary-weight. That copy is owned by the Rollouts controller — the
+chart must not render it, or the two would fight.
 */}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -15,26 +25,18 @@ metadata:
   labels:
     {{- include "shopfast.labels" . | nindent 4 }}
   annotations:
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    # target-type ip is REQUIRED for Argo Rollouts ALB traffic shaping:
-    # weights are applied to pod IPs, not to node ports.
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/group.name: {{ .Values.ingress.group }}
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
-    alb.ingress.kubernetes.io/ssl-redirect: "443"
-    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
-    {{- if .Values.ingress.certificateArn }}
-    alb.ingress.kubernetes.io/certificate-arn: {{ .Values.ingress.certificateArn | quote }}
-    {{- end }}
-    alb.ingress.kubernetes.io/healthcheck-path: /actuator/health/readiness
-    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
-    alb.ingress.kubernetes.io/success-codes: "200"
-    alb.ingress.kubernetes.io/tags: Project={{ .Release.Namespace }},ManagedBy=argocd
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.clusterIssuer | quote }}
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "16m"
     {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
 spec:
   ingressClassName: {{ .Values.ingress.ingressClassName }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ include "shopfast.fullname" . }}-tls
   rules:
     - host: {{ .Values.ingress.host | quote }}
       http:
@@ -48,7 +50,11 @@ spec:
                   number: {{ .Values.service.port }}
 {{- if and (eq .Values.deploymentStrategy "bluegreen") .Values.ingress.previewHost }}
 ---
-{{/* Preview hostname: verify the green stack publicly before promoting it. */}}
+{{/*
+Preview hostname: verify the green stack publicly before promoting it.
+Gets its own certificate — HTTP-01 cannot issue wildcards, so each hostname
+needs its own Secret.
+*/}}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -57,18 +63,14 @@ metadata:
     {{- include "shopfast.labels" . | nindent 4 }}
     shopfast.io/role: preview
   annotations:
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
-    alb.ingress.kubernetes.io/group.name: {{ .Values.ingress.group }}
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
-    alb.ingress.kubernetes.io/ssl-redirect: "443"
-    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
-    {{- if .Values.ingress.certificateArn }}
-    alb.ingress.kubernetes.io/certificate-arn: {{ .Values.ingress.certificateArn | quote }}
-    {{- end }}
-    alb.ingress.kubernetes.io/healthcheck-path: /actuator/health/readiness
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.clusterIssuer | quote }}
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
 spec:
   ingressClassName: {{ .Values.ingress.ingressClassName }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.previewHost | quote }}
+      secretName: {{ include "shopfast.fullname" . }}-preview-tls
   rules:
     - host: {{ .Values.ingress.previewHost | quote }}
       http:

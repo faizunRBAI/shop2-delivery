@@ -1,7 +1,7 @@
 # ---------------------------------------------------------------------------
 # Dedicated VPC for the delivery platform.
-# Two AZs: public subnets carry the ALB + NAT gateway, private subnets carry
-# the EKS worker nodes. Single NAT gateway is a deliberate cost trade-off
+# Two AZs: public subnets carry the public NLB + NAT gateway, private subnets
+# carry the EKS worker nodes. Single NAT gateway is a deliberate cost trade-off
 # (documented in README); a second NAT per AZ is the Tier-3 upgrade.
 # ---------------------------------------------------------------------------
 
@@ -52,9 +52,11 @@ resource "aws_subnet" "public" {
 
   tags = {
     Name = "${var.project_name}-public-${local.azs[count.index]}"
-    # Required so the AWS Load Balancer Controller can auto-discover
-    # subnets for internet-facing ALBs.
-    "kubernetes.io/role/elb"                      = "1"
+    # kubernetes.io/role/elb is how the in-tree AWS cloud provider discovers
+    # which subnets to place an internet-facing LoadBalancer Service in. The
+    # ingress-nginx controller's Service relies on exactly this tag.
+    "kubernetes.io/role/elb" = "1"
+    # The cluster tag scopes that discovery to THIS cluster.
     "kubernetes.io/cluster/${local.cluster_name}" = "shared"
   }
 }
@@ -68,8 +70,8 @@ resource "aws_subnet" "private" {
 
   tags = {
     Name = "${var.project_name}-private-${local.azs[count.index]}"
-    # Required for internal load balancers and for the controller to place
-    # worker-node targets correctly.
+    # Required for internal load balancers, and it is also where the worker
+    # nodes (and therefore the pod IPs the NLB targets) live.
     "kubernetes.io/role/internal-elb"             = "1"
     "kubernetes.io/cluster/${local.cluster_name}" = "shared"
   }

@@ -4,22 +4,23 @@ dev: Developer { shape: person; udap-type: generic.user }
 gh: GitHub Monorepo { udap-type: generic.app }
 ga: GitHub Actions CI { udap-type: generic.app }
 ecr: Amazon ECR { udap-type: aws.ecr }
-r53: Route53 shop2.royalbengal.xyz { udap-type: aws.route53 }
-acm: ACM Wildcard TLS Cert { udap-type: aws.acm }
+cpanel: cPanel DNS CNAME records { udap-type: generic.cdn }
+le: Lets Encrypt ACME { udap-type: generic.app }
 s3state: S3 Terraform State { udap-type: aws.s3 }
 users: End Users { shape: person; udap-type: generic.user }
 vpc: VPC 10.42.0.0/16 us-east-1 {
-  alb: Public ALB HTTPS { udap-type: aws.alb }
+  nlb: Public NLB ports 80 443 { udap-type: aws.alb }
   natgw: NAT Gateway { udap-type: aws.nat }
   eks: EKS Control Plane 1.33 { udap-type: aws.eks }
   nodes: Managed Node Group t3.large x2 { udap-type: aws.ec2 }
+  nginx: ingress-nginx Controller { udap-type: generic.app }
+  certmgr: cert-manager HTTP01 { udap-type: generic.app }
   argocd: Argo CD App-of-Apps { udap-type: generic.app }
   rollouts: Argo Rollouts Controller { udap-type: generic.app }
   shopfast: ShopFast Spring Boot { udap-type: generic.app }
   vm: VictoriaMetrics TSDB { udap-type: generic.app }
   vmagent: vmagent Scraper { udap-type: generic.app }
   grafana: Grafana Dashboards { udap-type: generic.app }
-  albc: AWS LB Controller { udap-type: generic.app }
 }
 
 dev -> gh: git push
@@ -29,20 +30,26 @@ ga -> vpc.eks: terraform apply
 ga -> ecr: build and push image sha
 ga -> gh: bump image tag in gitops
 vpc.argocd -> gh: poll desired state
+vpc.argocd -> vpc.nginx: sync ingress controller
+vpc.argocd -> vpc.certmgr: sync cert-manager
 vpc.argocd -> vpc.rollouts: apply Rollout manifests
 vpc.argocd -> vpc.shopfast: sync helm release
 vpc.argocd -> vpc.vm: sync monitoring stack
 vpc.argocd -> vpc.grafana: sync dashboards
 vpc.rollouts -> vpc.shopfast: bluegreen and canary steps
+vpc.rollouts -> vpc.nginx: canary ingress weights
 vpc.shopfast -> ecr: pull image by sha
 vpc.nodes -> vpc.natgw: egress
-vpc.albc -> vpc.alb: provision from Ingress
-users -> r53: resolve hostnames
-r53 -> vpc.alb: alias record
-acm -> vpc.alb: terminate TLS
-vpc.alb -> vpc.argocd: argocd.shop2.royalbengal.xyz
-vpc.alb -> vpc.grafana: grafana.shop2.royalbengal.xyz
-vpc.alb -> vpc.shopfast: shopfast.shop2.royalbengal.xyz
+vpc.nginx -> vpc.nlb: provision LoadBalancer Service
+vpc.certmgr -> le: HTTP01 challenge on port 80
+le -> vpc.nlb: validate challenge token
+vpc.certmgr -> vpc.nginx: issue and renew TLS secrets
+users -> cpanel: resolve hostnames
+cpanel -> vpc.nlb: CNAME to NLB hostname
+vpc.nlb -> vpc.nginx: forward 80 and 443
+vpc.nginx -> vpc.argocd: argocd.shop2.royalbengal.xyz
+vpc.nginx -> vpc.grafana: grafana.shop2.royalbengal.xyz
+vpc.nginx -> vpc.shopfast: shopfast.shop2.royalbengal.xyz
 vpc.vmagent -> vpc.shopfast: scrape actuator prometheus
 vpc.vmagent -> vpc.nodes: scrape kubelet cadvisor
 vpc.vmagent -> vpc.vm: remote write

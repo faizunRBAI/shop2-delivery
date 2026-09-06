@@ -1,0 +1,63 @@
+# ---------------------------------------------------------------------------
+# cert-manager — issues and RENEWS the platform's TLS certificates from
+# Let's Encrypt using the HTTP-01 challenge.
+#
+# WHY NOT ACM
+# -----------
+# ACM validates only via DNS or email. The domain is served by a cPanel zone
+# that offers no NS records (so no Route 53 delegation) and is edited by hand,
+# so a DNS-validated certificate would block on a manual record at every
+# reissuance. HTTP-01 is answered over port 80 on the public NLB and needs no
+# DNS API at all — issuance AND renewal are fully automatic once the operator's
+# three CNAMEs point at the load balancer.
+#
+# TRADE-OFF: HTTP-01 cannot issue wildcard certificates. That is fine here —
+# we have exactly three known hostnames, each with its own certificate.
+# ---------------------------------------------------------------------------
+
+# Install the CRDs with the chart. Argo CD syncs this Application in an earlier
+# sync-wave than the ClusterIssuer, so the CRDs always exist before any
+# ClusterIssuer/Certificate object is applied.
+crds:
+  enabled: true
+  keep: true
+
+replicaCount: 1
+
+# Let cert-manager solve challenges for Ingresses in every namespace.
+global:
+  leaderElection:
+    namespace: cert-manager
+
+resources:
+  requests:
+    cpu: 20m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+webhook:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
+
+cainjector:
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+prometheus:
+  enabled: true
+  servicemonitor:
+    # We scrape via vmagent's static/kubernetes SD config, not the Prometheus
+    # Operator CRDs (which this cluster does not install).
+    enabled: false
+
+securityContext:
+  runAsNonRoot: true

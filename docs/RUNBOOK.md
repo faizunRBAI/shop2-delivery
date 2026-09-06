@@ -5,6 +5,41 @@ Install the Rollouts plugin once: `kubectl krew install argo-rollouts`.
 
 ---
 
+## DNS and TLS model — read this first
+
+This platform does **not** use Route 53 or ACM. The domain is served by a cPanel zone
+whose editor offers no `NS` record type, so subdomain delegation (and therefore
+DNS-validated ACM certificates) is impossible.
+
+Instead:
+
+- **One NLB**, created by the `ingress-nginx-controller` Service. Its hostname is stable
+  for the life of the cluster.
+- **Three CNAME records**, created by hand in cPanel, all pointing at that hostname.
+- **cert-manager** issues and renews Let's Encrypt certificates over the HTTP-01
+  challenge — no DNS API access required.
+
+Get the CNAME target at any time:
+
+```bash
+kubectl -n ingress-nginx get svc ingress-nginx-controller \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{"\n"}'
+```
+
+| cPanel record | Type | Value |
+|---|---|---|
+| `argocd.shop2` | CNAME | *(NLB hostname)* |
+| `grafana.shop2` | CNAME | *(NLB hostname)* |
+| `shopfast.shop2` | CNAME | *(NLB hostname)* |
+| `shopfast-preview.shop2` | CNAME | *(NLB hostname)* — only needed for Blue/Green |
+
+> **Let's Encrypt rate limits:** 50 certificates per registered domain per week, and
+> **5 duplicate certificates per week**. If you are debugging issuance, switch
+> `clusterIssuer` to `letsencrypt-staging` first — burning the duplicate limit locks a
+> hostname out for seven days.
+
+---
+
 ## Promote a Blue/Green release
 
 ```bash
@@ -27,7 +62,17 @@ kubectl argo rollouts -n shopfast abort shopfast
 kubectl argo rollouts -n shopfast get rollout shopfast --watch
 ```
 
-Weights advance 20 → 50 → 80 → 100 with pauses. To see the split from outside:
+Weights advance 20 → 50 → 80 → 100 with pauses. The split is applied by the Argo Rollouts
+**NGINX traffic router**, which creates a managed canary Ingress alongside the stable one:
+
+```bash
+# The controller-owned canary ingress and its current weight.
+kubectl -n shopfast get ingress
+kubectl -n shopfast get ingress shopfast-shopfast-canary \
+  -o jsonpath='{.metadata.annotations.nginx\.ingress\.kubernetes\.io/canary-weight}{"\n"}'
+```
+
+To see the split from outside:
 
 ```bash
 for i in $(seq 1 20); do
@@ -98,24 +143,69 @@ kubectl -n shopfast logs -l app.kubernetes.io/name=shopfast --tail=100
 
 ---
 
-## Diagnose: a URL returns 502/503
+## Diagnose: a URL returns 502/503/404
+
+Work outside-in. The first question is always *"is this DNS, TLS, or the app?"*
 
 ```bash
-# Does the ingress have an ALB?
-kubectl -n shopfast get ingress shopfast \
+# 1. Does DNS point at our load balancer?
+dig +short shopfast.shop2.royalbengal.xyz
+kubectl -n ingress-nginx get svc ingress-nginx-controller \
   -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{"\n"}'
+#    -> the two must agree. If not, fix the cPanel CNAME.
 
-# Is the LB controller healthy and what did it say?
-kubectl -n kube-system logs deploy/aws-load-balancer-controller --tail=100
+# 2. Bypass DNS entirely: does nginx route correctly by Host header?
+kubectl -n ingress-nginx run probe --rm -i --restart=Never \
+  --image=curlimages/curl:8.11.0 -- \
+  curl -s -o /dev/null -w '%{http_code}\n' \
+  -H 'Host: shopfast.shop2.royalbengal.xyz' \
+  http://ingress-nginx-controller.ingress-nginx.svc/actuator/health
+#    200 or 308 => the platform is fine and the problem is DNS/TLS.
 
-# Are the target groups healthy? (503 is usually "no healthy targets")
+# 3. Is the ingress registered and are there endpoints behind it?
 kubectl -n shopfast describe ingress shopfast
 kubectl -n shopfast get endpoints
+
+# 4. What did the controller actually do?
+kubectl -n ingress-nginx logs deploy/ingress-nginx-controller --tail=100
 ```
 
-Common causes: readiness probe failing (the pod is up but not Ready), a missing
-`kubernetes.io/role/elb` subnet tag, or the ACM certificate ARN missing from the ingress
-annotation.
+Common causes: the readiness probe failing (pod up but not Ready → 503), a missing
+`kubernetes.io/role/elb` subnet tag (no NLB at all), or a certificate not yet issued.
+
+---
+
+## Diagnose: TLS certificate not issued
+
+HTTP-01 requires that the public DNS name already resolves to the NLB **and** that port 80
+is reachable. Order of investigation:
+
+```bash
+# 1. Certificate objects and their readiness.
+kubectl get certificate -A
+
+# 2. Why is it not Ready? Walk the chain: Certificate -> Order -> Challenge.
+kubectl describe certificate <name> -n <namespace>
+kubectl get order -A
+kubectl describe challenge -A
+
+# 3. The issuer must have a registered ACME account.
+kubectl get clusterissuer
+kubectl describe clusterissuer letsencrypt-prod
+
+# 4. cert-manager's own account of events.
+kubectl -n cert-manager logs deploy/cert-manager --tail=150
+```
+
+| Symptom in the Challenge | Meaning | Fix |
+|---|---|---|
+| `NXDOMAIN` / no such host | the cPanel CNAME is missing | add the CNAME |
+| connection timeout on :80 | DNS points somewhere else | verify the CNAME target |
+| `404` on the challenge path | a global HTTPS redirect is on | `ssl-redirect` must stay `false` in the controller config |
+| `too many certificates` | Let's Encrypt rate limit | switch to `letsencrypt-staging`, wait out the week |
+
+The global redirect point is worth repeating: `controller.config.ssl-redirect` must remain
+`"false"`. Redirects are set per-ingress, which ingress-nginx exempts for the ACME path.
 
 ---
 
@@ -124,12 +214,13 @@ annotation.
 ```bash
 kubectl -n argocd get ingress argocd-server
 kubectl -n argocd get pods
+kubectl get certificate -n argocd
 dig +short argocd.shop2.royalbengal.xyz
-dig +short NS shop2.royalbengal.xyz     # is the cPanel delegation still live?
 ```
 
-If DNS resolves but TLS fails, the ACM certificate is not attached — check
-`alb.ingress.kubernetes.io/certificate-arn` on the ingress.
+If you get a 502 specifically, check that `server.insecure` is still `true`: the chart
+points the ingress at the server's port 80 only when it is, and pointing plain HTTP at
+port 443 produces exactly that error.
 
 ---
 
@@ -168,11 +259,15 @@ sets when `metrics.enabled: true`.
 ## Teardown
 
 Use the platform Destroy action (runs the rendered `destroy` workflow). Order matters:
-Kubernetes-created ALBs and their security groups are **not** in Terraform state, so
-delete the ingresses first or `terraform destroy` will hang on the VPC.
+the NLB is created by the AWS cloud provider from the ingress-nginx Service and is **not**
+in Terraform state, so it must be deleted first or `terraform destroy` hangs on the VPC
+waiting for ENIs that nothing will release.
 
 ```bash
-kubectl delete ingress --all -A
 kubectl -n argocd delete applications --all
+kubectl delete ingress --all -A
+kubectl -n ingress-nginx delete svc ingress-nginx-controller
 # then run the destroy workflow
 ```
+
+The destroy workflow already does this; the manual sequence is for when it is interrupted.

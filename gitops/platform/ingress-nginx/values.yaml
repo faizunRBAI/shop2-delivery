@@ -1,0 +1,132 @@
+# ---------------------------------------------------------------------------
+# ingress-nginx — the single public entrypoint for the whole platform.
+#
+# WHY NLB AND NOT ALB
+# -------------------
+# The DNS records that point at this load balancer are maintained BY HAND in a
+# cPanel zone (the host offers no NS records, so Route 53 delegation and
+# therefore ACM are unavailable). A hand-managed CNAME must point at a hostname
+# that does not change. An NLB created once by this Service is stable for the
+# life of the cluster; ALBs created per-Ingress by the AWS LB Controller are
+# not, and every recreation would silently break DNS.
+#
+# WHICH CONTROLLER CREATES THE NLB — READ BEFORE EDITING ANNOTATIONS
+# ------------------------------------------------------------------
+# This cluster does NOT run the AWS Load Balancer Controller (its IAM role was
+# deliberately removed from infra/iam_irsa.tf). The load balancer is created by
+# the IN-TREE AWS cloud provider built into the EKS control plane, using the
+# node/cluster IAM policies that already exist.
+#
+# That distinction decides the annotation spelling:
+#
+#   aws-load-balancer-type: nlb        <- in-tree provider (WHAT WE USE)
+#   aws-load-balancer-type: external   <- hands ownership to the AWS LB
+#                                         Controller, which is NOT installed
+#                                         here; the Service would sit at
+#                                         <pending> forever.
+#
+# TLS terminates HERE, on certificates issued by cert-manager from Let's
+# Encrypt over the HTTP-01 challenge. See cert-manager-issuer/.
+# ---------------------------------------------------------------------------
+
+controller:
+  replicaCount: 2
+
+  # One IngressClass for the whole cluster, and make it the default so an
+  # Ingress that forgets ingressClassName is still served rather than silently
+  # ignored.
+  ingressClassResource:
+    name: nginx
+    enabled: true
+    default: true
+    controllerValue: k8s.io/ingress-nginx
+
+  service:
+    enabled: true
+    type: LoadBalancer
+    # Cluster (not Local): with the in-tree provider the NLB targets node
+    # ports, and Local would fail health checks on nodes that happen not to
+    # run a controller replica. Client IP is recovered from the proxy protocol
+    # headers instead (use-forwarded-headers below).
+    externalTrafficPolicy: Cluster
+    annotations:
+      # In-tree AWS cloud provider: create a Network Load Balancer.
+      service.beta.kubernetes.io/aws-load-balancer-type: nlb
+      # Public.
+      service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+      # Even traffic distribution across both AZs.
+      service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+      # Both listeners are plain TCP. TLS is terminated by nginx inside the
+      # cluster, NOT by the load balancer — an NLB cannot terminate TLS with a
+      # certificate that lives in a Kubernetes Secret.
+      service.beta.kubernetes.io/aws-load-balancer-backend-protocol: tcp
+    ports:
+      http: 80
+      https: 443
+    targetPorts:
+      http: http
+      https: https
+
+  config:
+    # DO NOT set force-ssl-redirect or ssl-redirect globally to "true" here.
+    #
+    # The HTTP-01 ACME challenge is served over PLAIN HTTP on port 80 and must
+    # succeed BEFORE any certificate exists. A global redirect makes the very
+    # first issuance impossible and leaves every host permanently certificate-
+    # less. Redirects are applied PER INGRESS instead (ingress-nginx exempts
+    # the /.well-known/acme-challenge/ path from per-ingress redirects, so
+    # renewals keep working).
+    ssl-redirect: "false"
+
+    # Recover the real client IP from the load balancer.
+    use-forwarded-headers: "true"
+    enable-real-ip: "true"
+
+    # Modern TLS only.
+    ssl-protocols: "TLSv1.2 TLSv1.3"
+    ssl-ciphers: "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305"
+
+    # Argo CD's UI streams long-lived responses; the defaults are too tight.
+    proxy-read-timeout: "300"
+    proxy-send-timeout: "300"
+    proxy-body-size: "64m"
+
+    # Structured access logs so vmagent/Grafana can chart them meaningfully.
+    log-format-escape-json: "true"
+
+  # Expose controller metrics so vmagent can scrape ingress traffic per host —
+  # this is what makes the canary weight visible on the Grafana dashboard.
+  metrics:
+    enabled: true
+    port: 10254
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      memory: 512Mi
+
+  # Spread the two replicas across AZs so one node loss never drops ingress.
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: ScheduleAnyway
+      labelSelector:
+        matchLabels:
+          app.kubernetes.io/name: ingress-nginx
+          app.kubernetes.io/component: controller
+
+  admissionWebhooks:
+    enabled: true
+
+# The default backend answers unmatched hosts with a 404 instead of leaking
+# whichever ingress happens to sort first.
+defaultBackend:
+  enabled: true
+  resources:
+    requests:
+      cpu: 10m
+      memory: 20Mi
+    limits:
+      memory: 64Mi

@@ -1,0 +1,43 @@
+# ---------------------------------------------------------------------------
+# ACME ClusterIssuers (letsencrypt-staging + letsencrypt-prod).
+#
+# SYNC WAVE 0: strictly after the cert-manager chart (wave -1), because a
+# ClusterIssuer is an instance of a CRD that chart installs. Applying both in
+# one wave races CRD establishment and fails with:
+#   "unable to recognize ... no matches for kind ClusterIssuer"
+#
+# SkipDryRunOnMissingResource tolerates the brief window where the CRD is
+# registered but not yet served by the API aggregation layer.
+# ---------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: cert-manager-issuer
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: PLACEHOLDER_REPO_URL
+    targetRevision: main
+    path: gitops/platform/cert-manager-issuer
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: cert-manager
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - SkipDryRunOnMissingResource=true
+    retry:
+      limit: 8
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m

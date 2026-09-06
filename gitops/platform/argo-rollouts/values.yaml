@@ -1,8 +1,14 @@
 # ---------------------------------------------------------------------------
 # Argo Rollouts controller.
-# Owns Rollout resources cluster-wide and manipulates ALB target-group weights
-# for canary traffic shifting (requires the AWS Load Balancer Controller,
-# installed by the bootstrap with an IRSA role from Terraform).
+#
+# Owns Rollout resources cluster-wide. For canary releases it uses the NGINX
+# traffic router: it copies the application's stable Ingress into a managed
+# "-canary" Ingress and drives nginx.ingress.kubernetes.io/canary-weight as the
+# rollout steps progress. That requires permission to read and write Ingress
+# objects, which clusterInstall provides.
+#
+# There is no AWS Load Balancer Controller in this cluster — traffic splitting
+# happens inside nginx, not on an ALB (see gitops/platform/ingress-nginx).
 # ---------------------------------------------------------------------------
 
 installCRDs: true
@@ -19,13 +25,14 @@ controller:
   metrics:
     enabled: true
 
-# The Rollouts dashboard is an internal tool; it is NOT published on the ALB.
-# Argo CD's own UI shows rollout progress via the health customization.
+# The Rollouts dashboard is an internal tool; it is NOT published on the public
+# load balancer. Argo CD's own UI shows rollout progress via the health
+# customization in gitops/platform/argocd/values.yaml.
 dashboard:
   enabled: false
 
-# Grant the controller permission to read/modify Ingress objects so it can
-# adjust ALB canary weights.
+# Cluster-scoped install: grants the controller permission to read and modify
+# Ingress objects so it can create and weight the canary ingress.
 clusterInstall: true
 
 serviceAccount:

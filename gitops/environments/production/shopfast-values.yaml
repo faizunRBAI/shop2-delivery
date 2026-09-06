@@ -7,8 +7,9 @@
 #
 # Nothing else deploys this application. No kubectl apply, no helm upgrade.
 #
-# image.repository and ingress.certificateArn are filled in by the bootstrap
-# from terraform outputs on the first run.
+# image.repository is filled in by the bootstrap from terraform outputs on the
+# first run. There is no certificate ARN to substitute any more — TLS is issued
+# in-cluster by cert-manager from Let's Encrypt.
 # ---------------------------------------------------------------------------
 
 # standard | bluegreen | canary
@@ -28,9 +29,11 @@ ingress:
   enabled: true
   host: shopfast.shop2.royalbengal.xyz
   previewHost: shopfast-preview.shop2.royalbengal.xyz
-  ingressClassName: alb
-  certificateArn: "PLACEHOLDER_ACM_CERT_ARN"
-  group: shop2-delivery
+  ingressClassName: nginx
+  # Switch to letsencrypt-staging while debugging the ingress or DNS: the
+  # production ACME endpoint allows only 5 duplicate certificates per week and
+  # exhausting that locks this hostname out for 7 days.
+  clusterIssuer: letsencrypt-prod
 
 resources:
   requests:
