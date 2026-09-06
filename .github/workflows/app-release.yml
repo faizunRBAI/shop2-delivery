@@ -77,6 +77,7 @@ jobs:
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       AWS_REGION: us-east-1
       AWS_DEFAULT_REGION: us-east-1
+      PROJECT_NAME: ${{ secrets.PROJECT_NAME }}
       TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
       TF_VAR_region: us-east-1
       TF_VAR_base_domain: shop2.royalbengal.xyz

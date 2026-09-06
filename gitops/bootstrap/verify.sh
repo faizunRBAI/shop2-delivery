@@ -39,12 +39,39 @@ if [ -z "$BASE_DOMAIN" ] && [ -d infra ]; then
 fi
 BASE_DOMAIN="${BASE_DOMAIN:-shop2.royalbengal.xyz}"
 
-# Is there a real application image to deploy yet? If image.tag is still the
-# placeholder, the shopfast Application is EXPECTED to be unsynced.
-APP_RELEASED=1
-if grep -q 'PLACEHOLDER_IMAGE_TAG' \
-     gitops/environments/production/shopfast-values.yaml 2>/dev/null; then
-  APP_RELEASED=0
+# --- 0b. Has a real application image actually been released? --------------
+# ASK THE REGISTRY, NOT THE MANIFEST.
+#
+# This used to test whether shopfast-values.yaml still contained
+# PLACEHOLDER_IMAGE_TAG. That signal is wrong after the first deploy: the
+# bootstrap SEEDS the tag with $GITHUB_SHA and commits it, so the placeholder
+# is gone from git while ECR is still empty. verify then judged shopfast
+# strictly and failed the pipeline for the expected "no release yet" state.
+#
+# The authoritative question is whether the tag the manifest asks for exists
+# in ECR. If it does not, the rollout can only ever be ImagePullBackOff and
+# that is a pending human action (run app-release), not a platform defect.
+APP_RELEASED=0
+SHOPFAST_VALUES="gitops/environments/production/shopfast-values.yaml"
+WANTED_TAG=""
+if [ -f "$SHOPFAST_VALUES" ]; then
+  WANTED_TAG="$(sed -n 's/^[[:space:]]*tag:[[:space:]]*"\{0,1\}\([^"[:space:]]*\)"\{0,1\}[[:space:]]*$/\1/p' \
+                  "$SHOPFAST_VALUES" | head -1)"
+fi
+
+if [ -n "$WANTED_TAG" ] && [ "$WANTED_TAG" != "PLACEHOLDER_IMAGE_TAG" ]; then
+  if aws ecr describe-images \
+        --repository-name "${PROJECT_NAME:-shop2-delivery}/shopfast" \
+        --image-ids "imageTag=${WANTED_TAG}" \
+        --region "${AWS_REGION:-us-east-1}" >/dev/null 2>&1; then
+    APP_RELEASED=1
+  fi
+fi
+
+if [ "$APP_RELEASED" -eq 1 ]; then
+  echo "Application image ${WANTED_TAG} found in ECR — asserting ShopFast strictly."
+else
+  echo "No application image for tag '${WANTED_TAG:-none}' in ECR — ShopFast checks are advisory."
 fi
 
 # --- 1. Cluster reachable and nodes ready ----------------------------------
@@ -221,6 +248,8 @@ fi
 READY_PODS="$(kubectl -n shopfast get pods --no-headers 2>/dev/null | grep -c 'Running' || true)"
 if [ "${READY_PODS:-0}" -ge 1 ]; then
   ok "${READY_PODS} ShopFast pod(s) Running"
+elif [ "$APP_RELEASED" -eq 0 ]; then
+  warn "no Running ShopFast pods — expected, no image has been released"
 else
   warn "no Running ShopFast pods yet"
   kubectl -n shopfast get pods 2>/dev/null || true
@@ -248,6 +277,10 @@ fi
 
 if kubectl -n monitoring get deploy vmagent >/dev/null 2>&1; then
   check_deploy monitoring vmagent
+fi
+
+if kubectl -n monitoring get deploy kube-state-metrics >/dev/null 2>&1; then
+  check_deploy monitoring kube-state-metrics
 fi
 
 # Prove metrics are actually being INGESTED, not merely that a pod is up.
@@ -393,9 +426,6 @@ BANNER
 ACTION REQUIRED (2) — the ShopFast application has never been released, so no
 image exists in ECR and its Argo CD Application cannot sync. Run the
 `app-release` workflow to build, scan, push and roll out the first version.
-
-That workflow pushes a release commit, which needs the GITOPS_PAT repository
-secret (a fine-grained token with Contents: Read and write on this repo).
 
 BANNER
   fi

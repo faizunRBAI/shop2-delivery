@@ -21,6 +21,37 @@ spec:
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
+  # -------------------------------------------------------------------------
+  # StatefulSet volumeClaimTemplates permanent-diff.
+  #
+  # The API server materialises each entry of spec.volumeClaimTemplates into a
+  # FULL typed PersistentVolumeClaim object and writes RUNTIME STATE into it.
+  # Read from the live cluster:
+  #
+  #   {"apiVersion":"v1","kind":"PersistentVolumeClaim",
+  #    "metadata":{"creationTimestamp":null,"name":"storage"},
+  #    "spec":{...},
+  #    "status":{"phase":"Pending"}}          <-- server-managed
+  #
+  # The spec-side defaults (creationTimestamp, volumeMode,
+  # persistentVolumeClaimRetentionPolicy, updateStrategy) ARE declared in
+  # 10-victoriametrics.yaml, which is the right fix for those. But `status` is
+  # live state — no manifest can express it — and volumeClaimTemplates is
+  # IMMUTABLE, so Argo can never apply the difference away either. Without this
+  # rule the Application sits at OutOfSync/Healthy forever while every sync
+  # reports "successfully synced (all tasks run)", and verify fails on the
+  # sync status alone.
+  #
+  # Deliberately scoped to ONE resource and ONE pointer: real drift in the
+  # StatefulSet's pod template, replicas or storage request is still detected.
+  # -------------------------------------------------------------------------
+  ignoreDifferences:
+    - group: apps
+      kind: StatefulSet
+      name: victoriametrics
+      namespace: monitoring
+      jsonPointers:
+        - /spec/volumeClaimTemplates/0/status
   syncPolicy:
     automated:
       prune: true
