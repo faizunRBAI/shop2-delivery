@@ -5,6 +5,21 @@
 # t3.large nodes that also run Argo CD, Argo Rollouts and the application.
 # VictoriaMetrics is Prometheus-API compatible, so Grafana queries it with the
 # Prometheus datasource type and PromQL works unchanged.
+#
+# ARGO CD PERMANENT-DIFF NOTE — do NOT delete the "server-defaulted" fields
+# below. A StatefulSet that omits them is written to the API server, which
+# fills them in; Argo CD then diffs live-vs-git forever and the Application
+# sits at OutOfSync/Healthy reporting "successfully synced (all tasks run)"
+# on every attempt. spec.volumeClaimTemplates is IMMUTABLE, so re-applying can
+# never remove the defaults — the diff is unwinnable unless git declares them.
+# Verified on the live cluster; the three fields the API server injected were:
+#
+#   spec.volumeClaimTemplates[0].metadata.creationTimestamp: null
+#   spec.persistentVolumeClaimRetentionPolicy: {Retain, Retain}
+#   spec.updateStrategy: {RollingUpdate, partition 0}
+#
+# Declaring them explicitly is preferred over an ignoreDifferences rule, which
+# would also mask REAL drift on the same paths.
 # ---------------------------------------------------------------------------
 apiVersion: v1
 kind: Service
@@ -35,6 +50,14 @@ spec:
   selector:
     matchLabels:
       app.kubernetes.io/name: victoriametrics
+  # --- server-defaulted, declared explicitly (see header note) --------------
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      partition: 0
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
   template:
     metadata:
       labels:
@@ -85,10 +108,13 @@ spec:
   volumeClaimTemplates:
     - metadata:
         name: storage
+        # Injected by the API server; declared so Argo's diff converges.
+        creationTimestamp: null
       spec:
         accessModes: ["ReadWriteOnce"]
         # Provisioned by the aws-ebs-csi-driver addon installed by Terraform.
         storageClassName: gp2
+        volumeMode: Filesystem
         resources:
           requests:
             storage: 20Gi
