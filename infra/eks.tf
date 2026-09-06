@@ -1,6 +1,24 @@
 # ---------------------------------------------------------------------------
 # EKS control plane, OIDC provider for IRSA, and a managed node group placed
 # in the private subnets.
+#
+# OWNERSHIP BOUNDARY — READ BEFORE ADDING RESOURCES HERE
+# ------------------------------------------------------
+# Two actors touch this cluster:
+#
+#   1. THIS TERRAFORM — owns the VPC, the control plane, IAM, the node group
+#      and the OIDC provider.
+#   2. THE UDAP PLATFORM's aws/eks preparation step — runs BEFORE this
+#      terraform on every deploy and installs the four core EKS addons.
+#
+# When both try to own the same object, terraform calls CreateAddon, AWS
+# answers 409 ResourceInUseException, and the apply dies.
+# resolve_conflicts_on_create does NOT help: it resolves CONFIGURATION
+# conflicts for an addon terraform is creating, not the EXISTENCE conflict.
+#
+# The addons are therefore ADOPTED with import blocks rather than created.
+# Import blocks are declarative, run during apply, and are a no-op once the
+# resource is in state — so retries stay clean.
 # ---------------------------------------------------------------------------
 
 data "aws_caller_identity" "current" {}
@@ -69,7 +87,11 @@ resource "aws_eks_cluster" "main" {
   }
 
   access_config {
-    authentication_mode                         = "API_AND_CONFIG_MAP"
+    authentication_mode = "API_AND_CONFIG_MAP"
+    # This ALSO creates an access entry for the creating principal, which in
+    # CI is the same IAM user the pipeline authenticates as. Declaring a
+    # separate aws_eks_access_entry for that principal is therefore guaranteed
+    # to fail with 409 — see the note further down.
     bootstrap_cluster_creator_admin_permissions = true
   }
 
@@ -181,35 +203,57 @@ resource "aws_eks_node_group" "main" {
 }
 
 # --- Cluster access for the CI principal -----------------------------------
-# Without this the GitHub Actions IAM user can run `aws eks update-kubeconfig`
-# successfully and then get 403 on every kubectl call.
-
-resource "aws_eks_access_entry" "ci" {
-  cluster_name  = aws_eks_cluster.main.name
-  principal_arn = data.aws_caller_identity.current.arn
-  type          = "STANDARD"
-
-  lifecycle {
-    # The creator already has implicit admin via
-    # bootstrap_cluster_creator_admin_permissions; this makes it explicit
-    # and survivable across credential rotations.
-    ignore_changes = [user_name]
-  }
-}
-
-resource "aws_eks_access_policy_association" "ci_admin" {
-  cluster_name  = aws_eks_cluster.main.name
-  principal_arn = data.aws_caller_identity.current.arn
-  policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
-
-  access_scope {
-    type = "cluster"
-  }
-
-  depends_on = [aws_eks_access_entry.ci]
-}
+#
+# There is deliberately NO aws_eks_access_entry / aws_eks_access_policy_
+# association resource here.
+#
+# The CI pipeline authenticates as the same IAM user that creates the cluster,
+# and access_config.bootstrap_cluster_creator_admin_permissions = true makes
+# EKS create that principal's access entry automatically, with cluster-admin
+# rights, at cluster creation time. Verified against the live cluster:
+#
+#   aws eks describe-access-entry --principal-arn <ci-user>
+#     -> exists, tags {}, createdAt == cluster creation timestamp
+#
+# Declaring it again failed every apply with:
+#   Error: creating EKS Access Entry (...): StatusCode: 409,
+#   ResourceInUseException: The specified access entry resource is already in
+#   use on this cluster.
+#
+# IF THE CI IDENTITY EVER CHANGES to an IAM principal that is NOT the cluster
+# creator, kubectl will start returning 403 and you must add BOTH an
+# aws_eks_access_entry and an aws_eks_access_policy_association (with
+# AmazonEKSClusterAdminPolicy) for that new principal here.
 
 # --- Core addons -----------------------------------------------------------
+#
+# ADOPTED, NOT CREATED — see the ownership note at the top of this file.
+#
+# All four addons are installed by the platform's aws/eks preparation step
+# before this terraform runs; verified with `aws eks describe-addon`, they all
+# carry the same Project/ManagedBy/Stack tags and the same creation timestamp.
+#
+# coredns is absent from the import list below ONLY because a previous partial
+# apply already recorded it in terraform state, and importing an
+# already-managed resource is an error. The other three never made it into
+# state, so their CreateAddon calls kept returning 409 on every retry.
+#
+# Import ids are "<cluster-name>:<addon-name>".
+
+import {
+  to = aws_eks_addon.vpc_cni
+  id = "${var.project_name}-eks:vpc-cni"
+}
+
+import {
+  to = aws_eks_addon.kube_proxy
+  id = "${var.project_name}-eks:kube-proxy"
+}
+
+import {
+  to = aws_eks_addon.ebs_csi
+  id = "${var.project_name}-eks:aws-ebs-csi-driver"
+}
 
 resource "aws_eks_addon" "vpc_cni" {
   cluster_name                = aws_eks_cluster.main.name
