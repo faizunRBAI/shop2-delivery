@@ -5,18 +5,25 @@
 # Two workflows need to write a commit back to main:
 #
 #   * app-release / gitops_bump  -> bumps image.tag (this IS the deployment)
-#   * deploy / configure         -> commits any manifest the bootstrap resolved
+#   * deploy / configure         -> commits the seeded image tag, once
 #
-# Both used to run a bare `git push origin HEAD:main`, which fails on this
-# repository: the rendered workflows declare no `permissions:` block, so the
-# job's GITHUB_TOKEN is issued read-only (`Contents: read`) and the push is
-# rejected. The pipeline spec has no key for granting workflow permissions,
-# so the token cannot be widened from the spec.
+# CREDENTIAL
+# ----------
+# This repository's default workflow permission is `write`, verified against
+# the live API:
+#   gh api repos/<owner>/<repo>/actions/permissions/workflow
+#   -> {"default_workflow_permissions":"write", ...}
+# and confirmed in the runner log ("GITHUB_TOKEN Permissions ... Contents: write").
 #
-# The fix is an explicit credential: GITOPS_PAT, a fine-grained Personal
-# Access Token with Contents:write on this repository only. It is injected
-# into the push URL for the duration of one command and never written to
-# .git/config, never echoed, and never persisted in the checkout.
+# So the checkout's own GITHUB_TOKEN can push and no extra secret is needed.
+# GITOPS_PAT is supported as an OPTIONAL override for organisations that
+# tighten the default workflow permission to read-only — a fine-grained PAT
+# (this repo, Contents: Read and write) then restores the push with no other
+# change.
+#
+# The credential is read straight from the environment into the remote URL of
+# ONE command. It is never copied into a named variable, never written to
+# .git/config, and never echoed. `set -x` is likewise never enabled here.
 #
 # Usage: git-push-main.sh "<what is being pushed, for the log>"
 # ---------------------------------------------------------------------------
@@ -26,19 +33,29 @@ WHAT="${1:-commit}"
 
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is not set — this must run in GitHub Actions}"
 
-if [ -z "${GITOPS_PAT:-}" ]; then
+# Choose the credential SOURCE by name only; the value is dereferenced once,
+# inline, when the remote URL is built.
+if [ -n "${GITOPS_PAT:-}" ]; then
+  CRED_VAR="GITOPS_PAT"
+  echo "==> Pushing with the GITOPS_PAT override"
+elif [ -n "${GITHUB_TOKEN:-}" ]; then
+  CRED_VAR="GITHUB_TOKEN"
+  echo "==> Pushing with the workflow GITHUB_TOKEN"
+else
   cat >&2 <<'MSG'
-ERROR: GITOPS_PAT is not set.
+ERROR: no credential available to push.
 
-  This job must push a commit to main, but the workflow's GITHUB_TOKEN is
-  read-only and the pipeline spec cannot grant `permissions: contents: write`.
+  Neither GITOPS_PAT nor GITHUB_TOKEN is present in this job's environment.
+  GITHUB_TOKEN must be passed explicitly by the stage:
 
-  Create a fine-grained Personal Access Token with
-      Repository access: only this repository
-      Permissions:       Contents -> Read and write
-  and store it as the repository secret GITOPS_PAT.
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  Nothing was pushed. Fix the secret and re-run.
+  If the organisation forces read-only workflow permissions, create a
+  fine-grained PAT (this repository, Contents: Read and write) and store it
+  as the repository secret GITOPS_PAT.
+
+  Nothing was pushed.
 MSG
   exit 1
 fi
@@ -47,13 +64,12 @@ git config user.name  "github-actions[bot]"
 git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
 # Rebase first: the other workflow may have pushed while this job ran.
-# The token goes on the command line of ONE invocation, never into config.
-PUSH_URL="https://x-access-token:${GITOPS_PAT}@github.com/${GITHUB_REPOSITORY}.git"
-
 echo "==> Rebasing onto origin/main before pushing ${WHAT}"
-git pull --rebase "$PUSH_URL" main
+git pull --rebase \
+  "https://x-access-token:${!CRED_VAR}@github.com/${GITHUB_REPOSITORY}.git" main
 
 echo "==> Pushing ${WHAT} to main"
-git push "$PUSH_URL" HEAD:main
+git push \
+  "https://x-access-token:${!CRED_VAR}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
 
 echo "==> Pushed."

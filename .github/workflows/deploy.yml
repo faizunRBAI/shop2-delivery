@@ -161,6 +161,7 @@ jobs:
     - name: Commit the seeded image tag if the bootstrap resolved one
       run: bash .github/scripts/commit-rendered-gitops.sh
       env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         GITOPS_PAT: ${{ secrets.GITOPS_PAT }}
   verify:
     runs-on: ubuntu-latest

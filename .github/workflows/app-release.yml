@@ -61,6 +61,7 @@ jobs:
     needs:
     - push_ecr
     env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GITOPS_PAT: ${{ secrets.GITOPS_PAT }}
     timeout-minutes: 15
     steps:

@@ -153,8 +153,14 @@ stages:
         env:
           CLUSTER_NAME: ${{ steps.tf.outputs.cluster }}
           GITHUB_SHA: ${{ github.sha }}
+      # Persists only the seeded image tag. The repository's default workflow
+      # permission is `write` (verified via the Actions API), so GITHUB_TOKEN
+      # can push; GITOPS_PAT is an optional override for orgs that force
+      # read-only tokens. Best-effort: a failed push here must not fail the
+      # platform deploy.
       - name: Commit the seeded image tag if the bootstrap resolved one
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITOPS_PAT: ${{ secrets.GITOPS_PAT }}
         run: bash .github/scripts/commit-rendered-gitops.sh
 
@@ -306,11 +312,15 @@ pipelines:
           - name: Build and push the immutable git-SHA tag to ECR
             run: bash .github/scripts/push-image.sh "${{ github.sha }}"
 
+      # THE RELEASE. Pushing the bumped image tag IS the deployment, so a
+      # failed push here is fatal by design — a release that silently did not
+      # happen is worse than a red pipeline.
       - id: gitops_bump
         kind: custom
         needs: [push_ecr]
         timeout_minutes: 15
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITOPS_PAT: ${{ secrets.GITOPS_PAT }}
         steps:
           - name: Bump the image tag in the GitOps values and commit
