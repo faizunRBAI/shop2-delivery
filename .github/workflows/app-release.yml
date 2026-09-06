@@ -31,11 +31,7 @@ jobs:
     - name: Install Trivy
       run: bash .github/scripts/install-trivy.sh
     - name: Trivy image scan
-      run: "set -e\n# --offline-scan for the same reason as the deploy security stage:\n\
-        # the image contains a Spring Boot fat jar, so the Java analyzer\n# would\
-        \ otherwise resolve POMs from Maven Central and hit the\n# shared-runner rate\
-        \ limit (429).\n./bin/trivy image --severity HIGH,CRITICAL --offline-scan\
-        \ \\\n  --exit-code 0 --no-progress shopfast:${{ github.sha }}\n"
+      run: bash .github/scripts/run-image-scan.sh "shopfast:${{ github.sha }}"
   push_ecr:
     runs-on: ubuntu-latest
     needs:
