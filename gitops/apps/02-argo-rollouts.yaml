@@ -1,8 +1,8 @@
 # ---------------------------------------------------------------------------
 # Argo Rollouts controller — provides the Rollout CRD that the ShopFast chart
-# renders for bluegreen and canary strategies, and drives ALB traffic weights.
-# Must be healthy BEFORE the shopfast Application syncs, hence sync-wave 0
-# against shopfast's wave 2.
+# renders for bluegreen and canary strategies, and drives the nginx canary
+# ingress weights. Must be healthy BEFORE the shopfast Application syncs,
+# hence sync-wave 0 against shopfast's wave 2.
 # ---------------------------------------------------------------------------
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -23,7 +23,7 @@ spec:
         releaseName: argo-rollouts
         valueFiles:
           - $values/gitops/platform/argo-rollouts/values.yaml
-    - repoURL: PLACEHOLDER_REPO_URL
+    - repoURL: https://github.com/faizunRBAI/shop2-delivery.git
       targetRevision: main
       ref: values
   destination:

@@ -29,7 +29,7 @@ spec:
         releaseName: cert-manager
         valueFiles:
           - $values/gitops/platform/cert-manager/values.yaml
-    - repoURL: PLACEHOLDER_REPO_URL
+    - repoURL: https://github.com/faizunRBAI/shop2-delivery.git
       targetRevision: main
       ref: values
   destination:

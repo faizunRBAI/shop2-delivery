@@ -7,9 +7,11 @@
 #
 # Nothing else deploys this application. No kubectl apply, no helm upgrade.
 #
-# image.repository is filled in by the bootstrap from terraform outputs on the
-# first run. There is no certificate ARN to substitute any more — TLS is issued
-# in-cluster by cert-manager from Let's Encrypt.
+# The ECR repository URL is COMMITTED rather than substituted at deploy time.
+# Argo CD reads this file FROM GIT, so any placeholder left here is what Argo
+# actually sees — and the configure stage cannot commit a substitution back
+# (the workflow's GITHUB_TOKEN is read-only). The registry host embeds the AWS
+# account id, which is not a secret: it appears in every ARN in this repo.
 # ---------------------------------------------------------------------------
 
 # standard | bluegreen | canary
@@ -18,7 +20,9 @@ deploymentStrategy: canary
 replicaCount: 3
 
 image:
-  repository: "PLACEHOLDER_ECR_REPOSITORY"
+  repository: "241533126054.dkr.ecr.us-east-1.amazonaws.com/shop2-delivery/shopfast"
+  # Immutable git SHA, rewritten by .github/scripts/gitops-bump.sh on every
+  # release. NEVER "latest" — the chart refuses that value outright.
   tag: "PLACEHOLDER_IMAGE_TAG"
   pullPolicy: IfNotPresent
 

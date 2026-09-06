@@ -15,7 +15,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: PLACEHOLDER_REPO_URL
+    repoURL: https://github.com/faizunRBAI/shop2-delivery.git
     targetRevision: main
     path: gitops/platform/monitoring
   destination:

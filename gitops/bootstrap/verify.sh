@@ -6,19 +6,26 @@
 # either proves something with real output or fails the pipeline. Nothing here
 # assumes that a previous step "probably worked".
 #
-# ONE DELIBERATE EXCEPTION: the public HTTPS endpoints depend on CNAME records
-# the operator creates by hand in cPanel (the host offers no NS records, so
-# Route 53 delegation and ACM are impossible — see infra/dns_tls.tf). Until
-# those records exist, DNS cannot resolve and no certificate can be issued.
-# That is a PENDING HUMAN ACTION, not a broken deployment, so it is reported
-# as such instead of failing the run and sending someone to debug code that is
-# already correct. Everything INSIDE the cluster is still asserted strictly.
+# TWO DELIBERATE EXCEPTIONS, both PENDING HUMAN ACTIONS rather than defects:
+#
+#  1. The public HTTPS endpoints depend on CNAME records the operator creates
+#     by hand in cPanel (the host offers no NS records, so Route 53 delegation
+#     and ACM are impossible — see infra/dns_tls.tf). Until those records
+#     exist, DNS cannot resolve and no certificate can be issued.
+#
+#  2. The `shopfast` Application cannot sync until an application image exists
+#     in ECR, which requires the app-release pipeline to have run at least
+#     once. On a first platform deploy that is expected, not broken.
+#
+# Everything else — the cluster, the controllers, the load balancer, the
+# issuers, the Argo CD platform Applications — is asserted strictly.
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 
 PASS=0
 FAIL=0
 DNS_PENDING=0
+APP_PENDING=0
 
 ok()    { printf '  \033[1;32m[PASS]\033[0m %s\n' "$*"; PASS=$((PASS+1)); }
 bad()   { printf '  \033[1;31m[FAIL]\033[0m %s\n' "$*"; FAIL=$((FAIL+1)); }
@@ -31,6 +38,14 @@ if [ -z "$BASE_DOMAIN" ] && [ -d infra ]; then
   BASE_DOMAIN="$(cd infra && terraform output -raw base_domain 2>/dev/null || true)"
 fi
 BASE_DOMAIN="${BASE_DOMAIN:-shop2.royalbengal.xyz}"
+
+# Is there a real application image to deploy yet? If image.tag is still the
+# placeholder, the shopfast Application is EXPECTED to be unsynced.
+APP_RELEASED=1
+if grep -q 'PLACEHOLDER_IMAGE_TAG' \
+     gitops/environments/production/shopfast-values.yaml 2>/dev/null; then
+  APP_RELEASED=0
+fi
 
 # --- 1. Cluster reachable and nodes ready ----------------------------------
 head_ "EKS cluster"
@@ -128,12 +143,22 @@ app_states() {
     -o jsonpath='{range .items[*]}{.status.sync.status}/{.status.health.status}{"\n"}{end}' 2>/dev/null
 }
 
-echo "Waiting up to 10 minutes for applications to converge..."
+# The shopfast Application is excluded from the convergence wait when no image
+# has been released yet — waiting 10 minutes for something that cannot
+# possibly converge just burns pipeline time.
+EXPECTED_GOOD_MSG="all applications"
+if [ "$APP_RELEASED" -eq 0 ]; then
+  EXPECTED_GOOD_MSG="all platform applications (shopfast excluded — no release yet)"
+fi
+
+echo "Waiting up to 10 minutes for ${EXPECTED_GOOD_MSG} to converge..."
 DEADLINE=$(( $(date +%s) + 600 ))
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
   TOTAL="$(kubectl -n argocd get applications --no-headers 2>/dev/null | wc -l | tr -d ' ')"
   GOOD="$(app_states | grep -c '^Synced/Healthy$' || true)"
-  if [ "${TOTAL:-0}" -gt 0 ] && [ "$GOOD" = "$TOTAL" ]; then
+  NEEDED="$TOTAL"
+  [ "$APP_RELEASED" -eq 0 ] && NEEDED=$(( TOTAL - 1 ))
+  if [ "${TOTAL:-0}" -gt 0 ] && [ "$GOOD" -ge "$NEEDED" ]; then
     break
   fi
   sleep 20
@@ -148,20 +173,29 @@ kubectl -n argocd get applications -o custom-columns=\
   --no-headers 2>/dev/null || true
 echo
 
-if [ "${TOTAL:-0}" -gt 0 ] && [ "$GOOD" = "$TOTAL" ]; then
-  ok "all ${TOTAL} Argo CD applications are Synced/Healthy"
-else
-  bad "${GOOD}/${TOTAL} applications are Synced/Healthy"
-  for app in $(kubectl -n argocd get applications -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
-    STATE="$(kubectl -n argocd get application "$app" \
-      -o jsonpath='{.status.sync.status}/{.status.health.status}' 2>/dev/null)"
-    [ "$STATE" = "Synced/Healthy" ] && continue
-    echo "--- $app ($STATE)"
-    kubectl -n argocd get application "$app" \
-      -o jsonpath='{.status.conditions[*].message}{"\n"}' 2>/dev/null || true
-    kubectl -n argocd get application "$app" \
-      -o jsonpath='{.status.operationState.message}{"\n"}' 2>/dev/null || true
-  done
+# Report each non-converged Application, classifying the expected one.
+for app in $(kubectl -n argocd get applications -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+  STATE="$(kubectl -n argocd get application "$app" \
+    -o jsonpath='{.status.sync.status}/{.status.health.status}' 2>/dev/null)"
+  [ "$STATE" = "Synced/Healthy" ] && continue
+
+  if [ "$app" = "shopfast" ] && [ "$APP_RELEASED" -eq 0 ]; then
+    warn "shopfast is ${STATE} — no application image has been released yet (run the app-release workflow)"
+    APP_PENDING=$((APP_PENDING+1))
+    continue
+  fi
+
+  bad "${app} is ${STATE}"
+  echo "--- $app"
+  kubectl -n argocd get application "$app" \
+    -o jsonpath='{.status.conditions[*].message}{"\n"}' 2>/dev/null || true
+  kubectl -n argocd get application "$app" \
+    -o jsonpath='{.status.operationState.message}{"\n"}' 2>/dev/null || true
+done
+
+CONVERGED=$(( GOOD + APP_PENDING ))
+if [ "${TOTAL:-0}" -gt 0 ] && [ "$CONVERGED" -ge "$TOTAL" ]; then
+  ok "${GOOD}/${TOTAL} Argo CD applications are Synced/Healthy"
 fi
 
 # --- 7. The workload, and the strategy invariant ---------------------------
@@ -178,6 +212,8 @@ elif [ "$HAS_ROLLOUT" -gt 0 ]; then
   kubectl -n shopfast get rollout 2>/dev/null || true
 elif [ "$HAS_DEPLOY" -gt 0 ]; then
   ok "standard strategy active: Deployment present, no Rollout rendered"
+elif [ "$APP_RELEASED" -eq 0 ]; then
+  warn "no ShopFast workload yet — expected, no image has been released"
 else
   warn "no ShopFast workload found yet (first sync may still be in flight)"
 fi
@@ -247,8 +283,14 @@ probe_internal() {
 
 # 308 is the per-ingress HTTP→HTTPS redirect and proves the ingress matched.
 probe_internal "argocd.${BASE_DOMAIN}"   "/healthz"          "200,308" "Argo CD"
-probe_internal "shopfast.${BASE_DOMAIN}" "/actuator/health"  "200,308" "ShopFast"
 probe_internal "grafana.${BASE_DOMAIN}"  "/api/health"       "200,308" "Grafana"
+
+# ShopFast has no ingress until it is released; probing would assert a 404.
+if [ "$APP_RELEASED" -eq 1 ]; then
+  probe_internal "shopfast.${BASE_DOMAIN}" "/actuator/health" "200,308" "ShopFast"
+else
+  warn "skipping the ShopFast route probe — no release yet"
+fi
 
 # --- 10. Public HTTPS endpoints -------------------------------------------
 # These depend on the operator's cPanel CNAME records. Reported, never fatal.
@@ -289,11 +331,14 @@ probe_public() {
 }
 
 # 307 is the Argo CD login redirect and is a healthy response for '/'.
-probe_public "https://argocd.${BASE_DOMAIN}/healthz"           "200"     "Argo CD health"
-probe_public "https://argocd.${BASE_DOMAIN}/"                  "200,307" "Argo CD dashboard"
-probe_public "https://shopfast.${BASE_DOMAIN}/actuator/health" "200"     "ShopFast health"
-probe_public "https://shopfast.${BASE_DOMAIN}/api/hello"       "200"     "ShopFast API"
-probe_public "https://grafana.${BASE_DOMAIN}/api/health"       "200"     "Grafana health"
+probe_public "https://argocd.${BASE_DOMAIN}/healthz" "200"     "Argo CD health"
+probe_public "https://argocd.${BASE_DOMAIN}/"        "200,307" "Argo CD dashboard"
+probe_public "https://grafana.${BASE_DOMAIN}/api/health" "200" "Grafana health"
+
+if [ "$APP_RELEASED" -eq 1 ]; then
+  probe_public "https://shopfast.${BASE_DOMAIN}/actuator/health" "200" "ShopFast health"
+  probe_public "https://shopfast.${BASE_DOMAIN}/api/hello"       "200" "ShopFast API"
+fi
 
 # --- 11. Certificate status ------------------------------------------------
 head_ "TLS certificates"
@@ -315,6 +360,7 @@ fi
 head_ "Summary"
 printf '  %d passed, %d failed' "$PASS" "$FAIL"
 [ "$DNS_PENDING" -gt 0 ] && printf ', %d awaiting DNS' "$DNS_PENDING"
+[ "$APP_PENDING" -gt 0 ] && printf ', %d awaiting first release' "$APP_PENDING"
 printf '\n\n'
 
 if [ "$FAIL" -gt 0 ]; then
@@ -322,12 +368,15 @@ if [ "$FAIL" -gt 0 ]; then
   exit 1
 fi
 
-if [ "$DNS_PENDING" -gt 0 ]; then
-  cat <<BANNER
-Verification PASSED for everything inside the cluster.
+if [ "$DNS_PENDING" -gt 0 ] || [ "$APP_PENDING" -gt 0 ]; then
+  echo "Verification PASSED for everything inside the cluster."
+  echo
 
-ACTION REQUIRED — ${DNS_PENDING} public endpoint(s) cannot be reached because
-their DNS records do not exist yet. In cPanel, create these CNAME records:
+  if [ "$DNS_PENDING" -gt 0 ]; then
+    cat <<BANNER
+ACTION REQUIRED (1) — ${DNS_PENDING} public endpoint(s) cannot be reached
+because their DNS records do not exist yet. In cPanel, create these CNAME
+records:
 
     argocd.shop2    CNAME  ${NLB_HOSTNAME}
     grafana.shop2   CNAME  ${NLB_HOSTNAME}
@@ -335,7 +384,22 @@ their DNS records do not exist yet. In cPanel, create these CNAME records:
 
 cert-manager will then issue the Let's Encrypt certificates automatically
 within a couple of minutes. Re-run this workflow afterwards to confirm.
+
 BANNER
+  fi
+
+  if [ "$APP_PENDING" -gt 0 ]; then
+    cat <<'BANNER'
+ACTION REQUIRED (2) — the ShopFast application has never been released, so no
+image exists in ECR and its Argo CD Application cannot sync. Run the
+`app-release` workflow to build, scan, push and roll out the first version.
+
+That workflow pushes a release commit, which needs the GITOPS_PAT repository
+secret (a fine-grained token with Contents: Read and write on this repo).
+
+BANNER
+  fi
+
   exit 0
 fi
 

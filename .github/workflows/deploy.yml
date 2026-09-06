@@ -29,6 +29,8 @@ jobs:
         \ \\\n    --set image.tag=lintsha\ndone\n"
     - name: Assert the strategy invariant (never a Deployment with a Rollout)
       run: bash .github/scripts/assert-strategy-exclusive.sh
+    - name: Assert no unresolved GitOps placeholders are committed
+      run: bash .github/scripts/assert-gitops-resolved.sh
   test:
     runs-on: ubuntu-latest
     needs:
@@ -121,7 +123,6 @@ jobs:
       TF_VAR_base_domain: shop2.royalbengal.xyz
       ARGOCD_ADMIN_PASSWORD: ${{ secrets.ARGOCD_ADMIN_PASSWORD }}
       GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
-      GITOPS_REPO_URL: ${{ secrets.GITOPS_REPO_URL }}
     timeout-minutes: 60
     steps:
     - uses: actions/checkout@v4
@@ -157,8 +158,10 @@ jobs:
       env:
         CLUSTER_NAME: ${{ steps.tf.outputs.cluster }}
         GITHUB_SHA: ${{ github.sha }}
-    - name: Commit the rendered GitOps manifests
+    - name: Commit the seeded image tag if the bootstrap resolved one
       run: bash .github/scripts/commit-rendered-gitops.sh
+      env:
+        GITOPS_PAT: ${{ secrets.GITOPS_PAT }}
   verify:
     runs-on: ubuntu-latest
     needs:

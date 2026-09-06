@@ -35,6 +35,8 @@ stages:
           done
       - name: Assert the strategy invariant (never a Deployment with a Rollout)
         run: bash .github/scripts/assert-strategy-exclusive.sh
+      - name: Assert no unresolved GitOps placeholders are committed
+        run: bash .github/scripts/assert-gitops-resolved.sh
 
   - id: test
     kind: test
@@ -119,7 +121,6 @@ stages:
       TF_VAR_base_domain: shop2.royalbengal.xyz
       ARGOCD_ADMIN_PASSWORD: ${{ secrets.ARGOCD_ADMIN_PASSWORD }}
       GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
-      GITOPS_REPO_URL: ${{ secrets.GITOPS_REPO_URL }}
     steps:
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -152,7 +153,9 @@ stages:
         env:
           CLUSTER_NAME: ${{ steps.tf.outputs.cluster }}
           GITHUB_SHA: ${{ github.sha }}
-      - name: Commit the rendered GitOps manifests
+      - name: Commit the seeded image tag if the bootstrap resolved one
+        env:
+          GITOPS_PAT: ${{ secrets.GITOPS_PAT }}
         run: bash .github/scripts/commit-rendered-gitops.sh
 
   - id: verify
@@ -307,6 +310,8 @@ pipelines:
         kind: custom
         needs: [push_ecr]
         timeout_minutes: 15
+        env:
+          GITOPS_PAT: ${{ secrets.GITOPS_PAT }}
         steps:
           - name: Bump the image tag in the GitOps values and commit
             run: bash .github/scripts/gitops-bump.sh "${{ github.sha }}"

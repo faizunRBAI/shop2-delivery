@@ -7,6 +7,10 @@
 # new desired state and Argo Rollouts performs the blue/green or canary
 # progression. Nothing in this script talks to the cluster.
 #
+# The push is delegated to git-push-main.sh — the workflow's GITHUB_TOKEN is
+# read-only on this repository, so the release commit needs the GITOPS_PAT
+# credential. See that script for why.
+#
 # Usage: gitops-bump.sh <git-sha>
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
@@ -61,8 +65,6 @@ PY
 echo "==> Diff:"
 git --no-pager diff -- "$VALUES_FILE"
 
-git config user.name  "github-actions[bot]"
-git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 git add "$VALUES_FILE"
 git commit -m "deploy(shopfast): roll production to ${GIT_SHA}
 
@@ -70,7 +72,6 @@ Image: immutable ECR tag ${GIT_SHA}.
 Argo CD reconciles this commit and Argo Rollouts performs the progressive
 rollout. No cluster mutation happens in CI."
 
-echo "==> Pushing the release commit"
-git push origin HEAD:main
+bash .github/scripts/git-push-main.sh "the release commit for ${GIT_SHA}"
 
 echo "==> Release committed. Argo CD owns the rest."

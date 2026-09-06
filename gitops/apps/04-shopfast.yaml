@@ -1,10 +1,22 @@
 # ---------------------------------------------------------------------------
 # The ShopFast application itself.
 #
-# Chart source: application/helm/shopfast in THIS repository.
+# Chart source:  application/helm/shopfast in THIS repository.
 # Release values: gitops/environments/production/shopfast-values.yaml — the
-# single file the CI pipeline edits when it bumps the image tag to a new git
-# SHA. That commit is the entire deployment: Argo CD does the rest.
+# single file the app-release pipeline edits when it bumps the image tag to a
+# new git SHA. That commit is the entire deployment: Argo CD does the rest.
+#
+# WHY THIS IS A MULTI-SOURCE APPLICATION
+# --------------------------------------
+# Argo CD resolves helm.valueFiles RELATIVE TO THE CHART PATH and refuses to
+# read a file outside it. The chart lives at application/helm/shopfast while
+# the release values live at gitops/environments/production/ — two different
+# directories in the same repository, which a single source cannot span.
+#
+# The multi-source form solves exactly this: a second source with `ref: values`
+# exposes the repository root as $values, so the chart can reference a values
+# file anywhere in the repo. The same pattern is used by the four platform
+# Applications that overlay repo-local values onto an upstream chart.
 # ---------------------------------------------------------------------------
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -18,15 +30,18 @@ metadata:
     - resources-finalizer.argocd.argoproj.io
 spec:
   project: default
-  source:
-    repoURL: PLACEHOLDER_REPO_URL
-    targetRevision: main
-    path: application/helm/shopfast
-    helm:
-      releaseName: shopfast
-      valueFiles:
-        - values.yaml
-        - /gitops/environments/production/shopfast-values.yaml
+  sources:
+    - repoURL: https://github.com/faizunRBAI/shop2-delivery.git
+      targetRevision: main
+      path: application/helm/shopfast
+      helm:
+        releaseName: shopfast
+        valueFiles:
+          - values.yaml
+          - $values/gitops/environments/production/shopfast-values.yaml
+    - repoURL: https://github.com/faizunRBAI/shop2-delivery.git
+      targetRevision: main
+      ref: values
   destination:
     server: https://kubernetes.default.svc
     namespace: shopfast

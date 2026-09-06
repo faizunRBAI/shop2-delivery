@@ -25,7 +25,7 @@ spec:
         releaseName: ingress-nginx
         valueFiles:
           - $values/gitops/platform/ingress-nginx/values.yaml
-    - repoURL: PLACEHOLDER_REPO_URL
+    - repoURL: https://github.com/faizunRBAI/shop2-delivery.git
       targetRevision: main
       ref: values
   destination:

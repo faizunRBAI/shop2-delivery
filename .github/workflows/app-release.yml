@@ -60,6 +60,8 @@ jobs:
     runs-on: ubuntu-latest
     needs:
     - push_ecr
+    env:
+      GITOPS_PAT: ${{ secrets.GITOPS_PAT }}
     timeout-minutes: 15
     steps:
     - uses: actions/checkout@v4

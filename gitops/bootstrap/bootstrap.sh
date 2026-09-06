@@ -3,8 +3,7 @@
 # Cluster bootstrap — the ONLY imperative step in the whole platform.
 #
 # It installs the components that cannot install themselves (ingress-nginx,
-# cert-manager and Argo CD), seeds their credentials, materialises the
-# account-specific values into the GitOps tree, and hands ownership of
+# cert-manager and Argo CD), seeds their credentials, and hands ownership of
 # everything else to the App-of-Apps root Application. From that point on the
 # cluster's desired state is whatever is committed under gitops/.
 #
@@ -34,7 +33,6 @@ fail() { printf '\n\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 : "${PROJECT_NAME:?PROJECT_NAME must be set}"
 : "${ARGOCD_ADMIN_PASSWORD:?ARGOCD_ADMIN_PASSWORD must be set}"
 : "${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}"
-: "${GITOPS_REPO_URL:?GITOPS_REPO_URL must be set}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
@@ -66,48 +64,45 @@ ECR_REPO="$(terraform output -raw ecr_repository_url)"
 BASE_DOMAIN="$(terraform output -raw base_domain)"
 popd >/dev/null
 
-[ -n "$VPC_ID" ]     || fail "vpc_id output is empty"
-[ -n "$ECR_REPO" ]   || fail "ecr_repository_url output is empty"
+[ -n "$VPC_ID" ]      || fail "vpc_id output is empty"
+[ -n "$ECR_REPO" ]    || fail "ecr_repository_url output is empty"
 [ -n "$BASE_DOMAIN" ] || fail "base_domain output is empty"
 
 log "Cluster=${CLUSTER_NAME} VPC=${VPC_ID} domain=${BASE_DOMAIN}"
 
-# --- Materialise account-specific values into the GitOps tree --------------
-# The repo ships placeholders because the repository URL and the ECR registry
-# are not knowable until the repo and infra exist. The workflow commits the
-# result, so what Argo CD reads from git is fully resolved — Argo never sees a
-# placeholder.
+# --- Consistency check: what Argo CD will read from git --------------------
+# The repository URL and the ECR registry are COMMITTED literals, not runtime
+# substitutions. That is deliberate and was learned the hard way: Argo CD
+# reads the child Applications FROM GIT, so a value substituted only in this
+# runner's working copy is invisible to it. The first attempt at this design
+# left PLACEHOLDER_REPO_URL in git and every child Application failed with
+# "failed to get git client for repo PLACEHOLDER_REPO_URL".
 #
-# There is no certificate ARN to substitute: TLS is issued in-cluster by
-# cert-manager.
-log "Rendering GitOps manifests for this repository and account"
-GITOPS_FILES=(
-  gitops/root-app.yaml
-  gitops/apps/00-ingress-nginx.yaml
-  gitops/apps/00b-cert-manager.yaml
-  gitops/apps/00c-cert-manager-issuer.yaml
-  gitops/apps/01-argocd.yaml
-  gitops/apps/02-argo-rollouts.yaml
-  gitops/apps/03-monitoring.yaml
-  gitops/apps/04-shopfast.yaml
-  gitops/environments/production/shopfast-values.yaml
-)
-for f in "${GITOPS_FILES[@]}"; do
-  [ -f "$f" ] || fail "expected GitOps file missing: $f"
-  sed -i \
-    -e "s#PLACEHOLDER_REPO_URL#${GITOPS_REPO_URL}#g" \
-    -e "s#PLACEHOLDER_ECR_REPOSITORY#${ECR_REPO}#g" \
-    "$f"
-done
+# So instead of substituting, ASSERT — if a placeholder is still committed,
+# Argo CD is guaranteed to fail and it is far cheaper to say so here.
+log "Checking that the committed GitOps manifests are fully resolved"
+if grep -RIl 'PLACEHOLDER_REPO_URL\|PLACEHOLDER_ECR_REPOSITORY' gitops/ >/dev/null 2>&1; then
+  grep -RIn 'PLACEHOLDER_REPO_URL\|PLACEHOLDER_ECR_REPOSITORY' gitops/ >&2 || true
+  fail "unresolved placeholders are committed under gitops/ — Argo CD reads these files from git and will fail to generate manifests. Commit the real repository URL and ECR registry."
+fi
+
+# The ECR registry committed in the values file must match the one terraform
+# actually provisioned, or the rollout pulls from a repository that does not
+# exist. Cheap to check, expensive to discover during a canary.
+SHOPFAST_VALUES="gitops/environments/production/shopfast-values.yaml"
+if ! grep -q "${ECR_REPO}" "$SHOPFAST_VALUES"; then
+  fail "${SHOPFAST_VALUES} does not reference the provisioned ECR repository (${ECR_REPO})"
+fi
 
 # The very first bootstrap has no application image yet. Seed the tag with the
 # commit being deployed so the chart's "no latest, no empty tag" guard passes;
-# the app-release workflow overwrites it on every subsequent release.
-if grep -q 'PLACEHOLDER_IMAGE_TAG' gitops/environments/production/shopfast-values.yaml; then
+# the app-release workflow overwrites it on every subsequent release. This one
+# IS substituted-and-committed, because it genuinely is not knowable until a
+# release exists (commit-rendered-gitops.sh pushes the result).
+if grep -q 'PLACEHOLDER_IMAGE_TAG' "$SHOPFAST_VALUES"; then
   SEED_TAG="${GITHUB_SHA:-bootstrap}"
   log "Seeding the initial image tag: ${SEED_TAG}"
-  sed -i "s#PLACEHOLDER_IMAGE_TAG#${SEED_TAG}#g" \
-    gitops/environments/production/shopfast-values.yaml
+  sed -i "s#PLACEHOLDER_IMAGE_TAG#${SEED_TAG}#g" "$SHOPFAST_VALUES"
 fi
 
 # --- Namespaces ------------------------------------------------------------

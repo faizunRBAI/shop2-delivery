@@ -5,6 +5,15 @@
 # gitops/apps/, where every other Application lives — so from this moment on,
 # the cluster's desired state is whatever is committed in this repository and
 # nothing else. Adding a platform component means committing a file there.
+#
+# The repository URL is COMMITTED here, not substituted at deploy time. An
+# earlier design shipped a PLACEHOLDER_REPO_URL token and had the configure
+# stage rewrite and commit it, which failed silently: the workflow's
+# GITHUB_TOKEN is read-only (the pipeline spec has no way to request
+# contents: write), so the commit never landed and Argo CD kept reading
+# literal placeholders from git — every child Application reported
+#   ComparisonError: failed to get git client for repo PLACEHOLDER_REPO_URL
+# while the root app, applied from the runner's local copy, looked healthy.
 # ---------------------------------------------------------------------------
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -16,7 +25,7 @@ metadata:
 spec:
   project: default
   source:
-    repoURL: PLACEHOLDER_REPO_URL
+    repoURL: https://github.com/faizunRBAI/shop2-delivery.git
     targetRevision: main
     path: gitops/apps
     directory:
