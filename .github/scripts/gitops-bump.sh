@@ -10,8 +10,8 @@
 # The push is delegated to git-push-main.sh, which owns credential selection
 # (the workflow GITHUB_TOKEN by default, GITOPS_PAT as an override).
 #
-# A FAILED PUSH IS FATAL HERE, deliberately: this script's commit is the only
-# thing that makes a release happen, so a push that silently did not land would
+# A FAILURE HERE IS FATAL, deliberately: this commit is the only thing that
+# makes a release happen, so a commit or push that silently did not land would
 # leave CI green while production still runs the previous image.
 #
 # Usage: gitops-bump.sh <git-sha>
@@ -67,6 +67,10 @@ PY
 
 echo "==> Diff:"
 git --no-pager diff -- "$VALUES_FILE"
+
+# Identity MUST be set before `git commit`, not before `git push`: a fresh
+# checkout has none, and the commit aborts with "empty ident name" (exit 128).
+bash .github/scripts/git-identity.sh
 
 git add "$VALUES_FILE"
 git commit -m "deploy(shopfast): roll production to ${GIT_SHA}

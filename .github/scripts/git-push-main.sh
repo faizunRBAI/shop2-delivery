@@ -7,6 +7,11 @@
 #   * app-release / gitops_bump  -> bumps image.tag (this IS the deployment)
 #   * deploy / configure         -> commits the seeded image tag, once
 #
+# SCOPE: this script PUSHES. It does not configure the committer identity —
+# that belongs to git-identity.sh and must run before `git commit`, several
+# steps earlier. Setting it here was an ordering bug: the commit failed with
+# "empty ident name" (exit 128) before this script was ever reached.
+#
 # CREDENTIAL
 # ----------
 # This repository's default workflow permission is `write`, verified against
@@ -16,10 +21,9 @@
 # and confirmed in the runner log ("GITHUB_TOKEN Permissions ... Contents: write").
 #
 # So the checkout's own GITHUB_TOKEN can push and no extra secret is needed.
-# GITOPS_PAT is supported as an OPTIONAL override for organisations that
-# tighten the default workflow permission to read-only — a fine-grained PAT
-# (this repo, Contents: Read and write) then restores the push with no other
-# change.
+# GITOPS_PAT is an OPTIONAL override for organisations that tighten the default
+# workflow permission to read-only — a fine-grained PAT (this repo,
+# Contents: Read and write) then restores the push with no other change.
 #
 # The credential is read straight from the environment into the remote URL of
 # ONE command. It is never copied into a named variable, never written to
@@ -59,9 +63,6 @@ ERROR: no credential available to push.
 MSG
   exit 1
 fi
-
-git config user.name  "github-actions[bot]"
-git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
 # Rebase first: the other workflow may have pushed while this job ran.
 echo "==> Rebasing onto origin/main before pushing ${WHAT}"

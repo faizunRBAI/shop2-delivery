@@ -1,6 +1,19 @@
 # ---------------------------------------------------------------------------
 # kube-state-metrics: exposes the state of Kubernetes objects (deployments,
 # pods, nodes, and — via custom resource state — Argo Rollouts) as metrics.
+#
+# RBAC NOTE: the ClusterRole must cover EVERY resource kube-state-metrics
+# collects by default, not just the obvious workload kinds. Each missing one
+# makes its informer fail to list/watch in a tight loop:
+#
+#   failed to list *v1.Lease: leases.coordination.k8s.io is forbidden:
+#   User "system:serviceaccount:monitoring:kube-state-metrics" cannot list
+#   resource "leases" in API group "coordination.k8s.io" at the cluster scope
+#
+# which floods the log and restarts the pod. The four groups below the
+# storage.k8s.io rule were added after observing exactly those denials in the
+# live cluster; they complete the default collector set. Verbs stay
+# list/watch only — kube-state-metrics never mutates anything.
 # ---------------------------------------------------------------------------
 apiVersion: v1
 kind: ServiceAccount
@@ -46,6 +59,19 @@ rules:
     verbs: ["list", "watch"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["storageclasses", "volumeattachments"]
+    verbs: ["list", "watch"]
+  # --- collectors that were denied in the live cluster ----------------------
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations", "mutatingwebhookconfigurations"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["certificates.k8s.io"]
+    resources: ["certificatesigningrequests"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterrolebindings", "clusterroles", "rolebindings", "roles"]
     verbs: ["list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

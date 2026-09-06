@@ -154,7 +154,7 @@ spec:
         app.kubernetes.io/name: vmagent
       annotations:
         # Re-roll the pod when the scrape config changes.
-        checksum/config: "v1"
+        checksum/config: "v2"
     spec:
       serviceAccountName: vmagent
       securityContext:
@@ -166,6 +166,20 @@ spec:
           args:
             - --promscrape.config=/config/scrape.yml
             - --remoteWrite.url=http://victoriametrics.monitoring.svc:8428/api/v1/write
+            # MUST be an absolute path inside a WRITABLE volume.
+            #
+            # vmagent buffers remote-write data on disk and defaults to the
+            # RELATIVE path "vmagent-remotewrite-data", which it creates in its
+            # working directory — "/" — and readOnlyRootFilesystem makes that
+            # impossible. The container then panics at startup, before serving
+            # anything, and CrashLoopBackOffs:
+            #
+            #   panic  FATAL: cannot create directory:
+            #   mkdir vmagent-remotewrite-data: read-only file system
+            #
+            # Pointing it into the /tmp emptyDir below keeps the hardened
+            # read-only root filesystem AND gives the queue somewhere to live.
+            - --remoteWrite.tmpDataPath=/tmp/vmagent-remotewrite-data
             - --httpListenAddr=:8429
             - --memory.allowedPercent=50
           ports:

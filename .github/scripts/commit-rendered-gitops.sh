@@ -15,11 +15,14 @@
 #
 # BEST-EFFORT BY DESIGN
 # ---------------------
-# Unlike gitops-bump.sh, a failure here must NOT fail the platform deploy:
-# Argo CD, ingress-nginx, cert-manager and monitoring do not depend on the
-# application image at all. Only the `shopfast` Application stays unsynced
-# until the first real release, and verify.sh reports that as a pending
-# action rather than a defect.
+# Unlike gitops-bump.sh, nothing here may fail the platform deploy: Argo CD,
+# ingress-nginx, cert-manager and monitoring do not depend on the application
+# image at all. Only the `shopfast` Application waits for the first release,
+# and verify.sh reports that as a pending action rather than a defect.
+#
+# That is why the commit and the push are each guarded: `set -e` would
+# otherwise abort the whole configure stage on a cosmetic problem, which is
+# precisely what happened when the git identity was unset (exit 128).
 #
 # Credential selection lives in git-push-main.sh (workflow GITHUB_TOKEN by
 # default, GITOPS_PAT as an override for orgs that force read-only tokens).
@@ -43,13 +46,21 @@ if [ -z "${GITOPS_PAT:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
   exit 0
 fi
 
+# Identity MUST be set before `git commit`, not before `git push`.
+bash .github/scripts/git-identity.sh
+
 git add gitops/
-git commit -m "chore(gitops): seed the initial image tag
+
+if ! git commit -m "chore(gitops): seed the initial image tag
 
 Resolved by the cluster bootstrap so Argo CD reads a concrete image tag from
-git instead of a placeholder. Overwritten by every subsequent release."
+git instead of a placeholder. Overwritten by every subsequent release."; then
+  echo
+  echo "::warning title=Seed image tag not committed::git commit failed. The platform deploy is unaffected; run app-release to set a real image tag."
+  echo
+  exit 0
+fi
 
-# Never fail the deploy on a push problem — report it and continue.
 if ! bash .github/scripts/git-push-main.sh "the seeded image tag"; then
   echo
   echo "::warning title=Seed image tag not pushed::The commit was created locally but could not be pushed. The platform deploy is unaffected; re-run app-release to set a real image tag."
