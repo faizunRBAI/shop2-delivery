@@ -52,10 +52,11 @@ jobs:
     timeout-minutes: 20
     steps:
     - uses: actions/checkout@v4
+    - name: Install Trivy
+      run: bash .github/scripts/install-trivy.sh
     - name: Trivy filesystem and IaC scan
-      run: "set -e\ncurl -fsSL -o trivy.tgz \\\n  https://github.com/aquasecurity/trivy/releases/download/v0.58.1/trivy_0.58.1_Linux-64bit.tar.gz\n\
-        tar -xzf trivy.tgz trivy\n./trivy fs --scanners vuln,secret --severity HIGH,CRITICAL\
-        \ \\\n  --exit-code 0 --no-progress application\n./trivy config --severity\
+      run: "set -e\n./bin/trivy fs --scanners vuln,secret --severity HIGH,CRITICAL\
+        \ \\\n  --exit-code 0 --no-progress application\n./bin/trivy config --severity\
         \ HIGH,CRITICAL --exit-code 0 --no-progress infra\n"
   provision:
     runs-on: ubuntu-latest

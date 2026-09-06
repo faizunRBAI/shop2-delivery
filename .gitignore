@@ -24,7 +24,8 @@ kubeconfig
 *.kubeconfig
 charts/*.tgz
 
-# Tooling
+# Tooling downloaded by CI (install-trivy.sh drops the binary in ./bin)
+/bin/
 trivy
 trivy.tgz
 .DS_Store
