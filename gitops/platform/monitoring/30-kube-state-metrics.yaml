@@ -14,6 +14,18 @@
 # storage.k8s.io rule were added after observing exactly those denials in the
 # live cluster; they complete the default collector set. Verbs stay
 # list/watch only — kube-state-metrics never mutates anything.
+#
+# PROBE NOTE (verified against v2.14.0 by running the image standalone and
+# curling both ports): the two health endpoints live on DIFFERENT listeners.
+#
+#   /healthz -> 8080 (http-metrics)  200 ; on 8081 it is 404
+#   /readyz  -> 8081 (telemetry)     200 ; on 8080 it is 404
+#
+# Pointing liveness at the telemetry port therefore 404s forever and the
+# kubelet kills the container roughly every 60s ("Liveness probe failed:
+# HTTP probe failed with statuscode: 404") even though the process is
+# perfectly healthy and serving metrics. Do NOT "simplify" these to the same
+# port — they are genuinely asymmetric upstream.
 # ---------------------------------------------------------------------------
 apiVersion: v1
 kind: ServiceAccount
@@ -132,16 +144,18 @@ spec:
               containerPort: 8080
             - name: telemetry
               containerPort: 8081
+          # /readyz is served ONLY on the telemetry listener (8081).
           readinessProbe:
             httpGet:
               path: /readyz
               port: telemetry
             initialDelaySeconds: 5
             periodSeconds: 10
+          # /healthz is served ONLY on the metrics listener (8080).
           livenessProbe:
             httpGet:
               path: /healthz
-              port: telemetry
+              port: http-metrics
             initialDelaySeconds: 10
             periodSeconds: 20
           resources:
