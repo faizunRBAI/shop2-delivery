@@ -225,6 +225,37 @@ print(json.dumps({
 printf '%s' "$GRAFANA_SECRET_YAML" | kubectl apply -f -
 unset GRAFANA_SECRET_YAML
 
+# Grafana resolves GF_SECURITY_ADMIN_PASSWORD from that Secret via secretKeyRef
+# ONCE, at container start — rewriting the Secret does NOT change a running
+# pod. Argo CD is restarted above for exactly the same reason; without the
+# equivalent here a password ROTATION silently has no effect until something
+# unrelated happens to reschedule the pod.
+#
+# Safe to restart because /var/lib/grafana is an emptyDir: the SQLite user
+# table is rebuilt from the environment on every start, so the new value is
+# authoritative immediately rather than losing to a persisted admin row.
+#
+# DELETE THE PODS rather than `kubectl rollout restart`: the Grafana Deployment
+# is owned by the `monitoring` Argo Application, which runs with selfHeal, and
+# `rollout restart` works by writing a kubectl.kubernetes.io/restartedAt
+# annotation into the pod template. That annotation is not in git, so Argo
+# would score it as drift and revert it — leaving the Application flapping
+# between Synced and OutOfSync. Deleting pods touches no managed object: the
+# existing ReplicaSet recreates them with the new Secret value.
+#
+# Guarded with `if`: on a FIRST bootstrap the Deployment does not exist yet
+# (Argo creates it in wave 1, after this script hands over), and a missing
+# Deployment must not fail the run.
+if kubectl -n monitoring get deployment grafana >/dev/null 2>&1; then
+  log "Recycling the Grafana pods so they pick up the admin credential"
+  kubectl -n monitoring delete pod -l app.kubernetes.io/name=grafana --wait=false
+  # Give the replacement pod time to become Ready; a failure here is a real
+  # problem (bad image, failing probe), not a cosmetic one.
+  kubectl -n monitoring rollout status deployment grafana --timeout=5m
+else
+  log "Grafana is not deployed yet — Argo will create it with the current credential"
+fi
+
 # --- Hand over to GitOps ---------------------------------------------------
 # The root Application points at gitops/apps/. Everything else — including
 # Argo CD's own configuration, ingress-nginx and cert-manager — is reconciled

@@ -24,26 +24,32 @@ spec:
   # -------------------------------------------------------------------------
   # StatefulSet volumeClaimTemplates permanent-diff.
   #
-  # The API server materialises each entry of spec.volumeClaimTemplates into a
-  # FULL typed PersistentVolumeClaim object and writes RUNTIME STATE into it.
-  # Read from the live cluster:
+  # spec.volumeClaimTemplates is an ATOMIC list in the Kubernetes schema and
+  # it is IMMUTABLE after creation. Read from the live object's managedFields,
+  # argocd-controller owns it as a single opaque unit:
+  #
+  #   "f:volumeClaimTemplates":{}        <-- no sub-fields, compared wholesale
+  #
+  # The API server materialises each entry into a FULL typed PVC and writes
+  # runtime state into it:
   #
   #   {"apiVersion":"v1","kind":"PersistentVolumeClaim",
   #    "metadata":{"creationTimestamp":null,"name":"storage"},
-  #    "spec":{...},
-  #    "status":{"phase":"Pending"}}          <-- server-managed
+  #    "spec":{...,"volumeMode":"Filesystem"},
+  #    "status":{"phase":"Pending"}}     <-- not expressible in git
   #
-  # The spec-side defaults (creationTimestamp, volumeMode,
-  # persistentVolumeClaimRetentionPolicy, updateStrategy) ARE declared in
-  # 10-victoriametrics.yaml, which is the right fix for those. But `status` is
-  # live state — no manifest can express it — and volumeClaimTemplates is
-  # IMMUTABLE, so Argo can never apply the difference away either. Without this
-  # rule the Application sits at OutOfSync/Healthy forever while every sync
-  # reports "successfully synced (all tasks run)", and verify fails on the
-  # sync status alone.
+  # So the array can never match what git declares, and being immutable it can
+  # never be applied away either: the Application sits at OutOfSync/Healthy
+  # forever while every sync reports "successfully synced (all tasks run)".
+  # A narrower pointer at .../0/status was tried first and did NOT converge —
+  # normalising a child of an atomic field does not change the parent's
+  # comparison. The whole array is the correct scope.
   #
-  # Deliberately scoped to ONE resource and ONE pointer: real drift in the
-  # StatefulSet's pod template, replicas or storage request is still detected.
+  # What this does NOT hide: image, args, probes, resources, replicas,
+  # securityContext, updateStrategy and every other field are still diffed
+  # normally, so genuine drift is still caught. Changing the storage request
+  # requires recreating the StatefulSet regardless, since the field is
+  # immutable — Argo could not apply such a change in place either way.
   # -------------------------------------------------------------------------
   ignoreDifferences:
     - group: apps
@@ -51,7 +57,7 @@ spec:
       name: victoriametrics
       namespace: monitoring
       jsonPointers:
-        - /spec/volumeClaimTemplates/0/status
+        - /spec/volumeClaimTemplates
   syncPolicy:
     automated:
       prune: true
