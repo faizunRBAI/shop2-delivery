@@ -15,16 +15,14 @@
 #
 # BEST-EFFORT BY DESIGN
 # ---------------------
-# The push needs the GITOPS_PAT credential (the workflow GITHUB_TOKEN is
-# read-only and the pipeline spec cannot grant contents: write). If that
-# secret is absent, the PLATFORM deploy must still succeed — Argo CD, nginx,
-# cert-manager and monitoring do not depend on the app image at all. Only the
-# `shopfast` Application stays unsynced until the first real release, and
-# verify.sh reports that as a pending action rather than a defect.
+# Unlike gitops-bump.sh, a failure here must NOT fail the platform deploy:
+# Argo CD, ingress-nginx, cert-manager and monitoring do not depend on the
+# application image at all. Only the `shopfast` Application stays unsynced
+# until the first real release, and verify.sh reports that as a pending
+# action rather than a defect.
 #
-# So: a missing PAT produces a loud warning here, never a failed deploy.
-# The app-release pipeline treats the same missing secret as FATAL, because
-# there a failed push means a release that silently never happened.
+# Credential selection lives in git-push-main.sh (workflow GITHUB_TOKEN by
+# default, GITOPS_PAT as an override for orgs that force read-only tokens).
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 
@@ -38,17 +36,10 @@ fi
 echo "==> Rendered changes:"
 git --no-pager diff --stat -- gitops/
 
-if [ -z "${GITOPS_PAT:-}" ]; then
-  cat <<'MSG'
-
-::warning title=Seed image tag not committed::GITOPS_PAT is not set, so the seeded image tag could not be pushed. The platform deploy is unaffected; the shopfast Application will stay unsynced until the first app-release run.
-
-  To enable it, create a fine-grained Personal Access Token with
-      Repository access: only this repository
-      Permissions:       Contents -> Read and write
-  and store it as the repository secret GITOPS_PAT.
-
-MSG
+if [ -z "${GITOPS_PAT:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
+  echo
+  echo "::warning title=Seed image tag not committed::No push credential in this job, so the seeded image tag was not persisted. The platform deploy is unaffected; the shopfast Application stays unsynced until the first app-release run."
+  echo
   exit 0
 fi
 
@@ -58,6 +49,12 @@ git commit -m "chore(gitops): seed the initial image tag
 Resolved by the cluster bootstrap so Argo CD reads a concrete image tag from
 git instead of a placeholder. Overwritten by every subsequent release."
 
-bash .github/scripts/git-push-main.sh "the seeded image tag"
+# Never fail the deploy on a push problem — report it and continue.
+if ! bash .github/scripts/git-push-main.sh "the seeded image tag"; then
+  echo
+  echo "::warning title=Seed image tag not pushed::The commit was created locally but could not be pushed. The platform deploy is unaffected; re-run app-release to set a real image tag."
+  echo
+  exit 0
+fi
 
 echo "==> Seed image tag committed."

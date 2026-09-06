@@ -7,9 +7,12 @@
 # new desired state and Argo Rollouts performs the blue/green or canary
 # progression. Nothing in this script talks to the cluster.
 #
-# The push is delegated to git-push-main.sh — the workflow's GITHUB_TOKEN is
-# read-only on this repository, so the release commit needs the GITOPS_PAT
-# credential. See that script for why.
+# The push is delegated to git-push-main.sh, which owns credential selection
+# (the workflow GITHUB_TOKEN by default, GITOPS_PAT as an override).
+#
+# A FAILED PUSH IS FATAL HERE, deliberately: this script's commit is the only
+# thing that makes a release happen, so a push that silently did not land would
+# leave CI green while production still runs the previous image.
 #
 # Usage: gitops-bump.sh <git-sha>
 # ---------------------------------------------------------------------------

@@ -72,19 +72,17 @@ log "Cluster=${CLUSTER_NAME} VPC=${VPC_ID} domain=${BASE_DOMAIN}"
 
 # --- Consistency check: what Argo CD will read from git --------------------
 # The repository URL and the ECR registry are COMMITTED literals, not runtime
-# substitutions. That is deliberate and was learned the hard way: Argo CD
-# reads the child Applications FROM GIT, so a value substituted only in this
-# runner's working copy is invisible to it. The first attempt at this design
-# left PLACEHOLDER_REPO_URL in git and every child Application failed with
-# "failed to get git client for repo PLACEHOLDER_REPO_URL".
+# substitutions, because Argo CD reads the child Applications FROM GIT: a
+# value substituted only in this runner's working copy is invisible to it.
 #
-# So instead of substituting, ASSERT — if a placeholder is still committed,
-# Argo CD is guaranteed to fail and it is far cheaper to say so here.
+# The check itself lives in ONE place — the same script the lint stage runs.
+# It was duplicated here once, as a plain `grep -R PLACEHOLDER_ gitops/`, and
+# that copy matched the explanatory COMMENTS in root-app.yaml and in this very
+# file, plus its own grep command line, failing a deploy on documentation.
+# Delegating means the two call sites can never diverge again.
 log "Checking that the committed GitOps manifests are fully resolved"
-if grep -RIl 'PLACEHOLDER_REPO_URL\|PLACEHOLDER_ECR_REPOSITORY' gitops/ >/dev/null 2>&1; then
-  grep -RIn 'PLACEHOLDER_REPO_URL\|PLACEHOLDER_ECR_REPOSITORY' gitops/ >&2 || true
-  fail "unresolved placeholders are committed under gitops/ — Argo CD reads these files from git and will fail to generate manifests. Commit the real repository URL and ECR registry."
-fi
+bash .github/scripts/assert-gitops-resolved.sh \
+  || fail "the committed GitOps manifests are not deployable — see the failures above"
 
 # The ECR registry committed in the values file must match the one terraform
 # actually provisioned, or the rollout pulls from a repository that does not

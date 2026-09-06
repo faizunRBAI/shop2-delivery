@@ -8,10 +8,10 @@
 # Nothing else deploys this application. No kubectl apply, no helm upgrade.
 #
 # The ECR repository URL is COMMITTED rather than substituted at deploy time.
-# Argo CD reads this file FROM GIT, so any placeholder left here is what Argo
-# actually sees — and the configure stage cannot commit a substitution back
-# (the workflow's GITHUB_TOKEN is read-only). The registry host embeds the AWS
-# account id, which is not a secret: it appears in every ARN in this repo.
+# Argo CD reads this file FROM GIT, so any placeholder left here is exactly
+# what Argo sees — substituting it in a CI working copy achieves nothing. The
+# registry host embeds the AWS account id, which is not a secret: it appears
+# in every ARN in this repository.
 # ---------------------------------------------------------------------------
 
 # standard | bluegreen | canary
