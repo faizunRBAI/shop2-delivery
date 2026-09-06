@@ -23,7 +23,7 @@ image:
   repository: "241533126054.dkr.ecr.us-east-1.amazonaws.com/shop2-delivery/shopfast"
   # Immutable git SHA, rewritten by .github/scripts/gitops-bump.sh on every
   # release. NEVER "latest" — the chart refuses that value outright.
-  tag: "PLACEHOLDER_IMAGE_TAG"
+  tag: "305c3a85e43646ef498ff12579aca2e4748cbd20"
   pullPolicy: IfNotPresent
 
 release:
