@@ -1,0 +1,84 @@
+{{- include "shopfast.validateStrategy" . -}}
+{{- if .Values.ingress.enabled }}
+{{/*
+Public ingress served by an ALB provisioned by the AWS Load Balancer
+Controller. TLS terminates at the ALB with the wildcard ACM certificate;
+port 80 is redirected to 443 so nothing is ever served in clear text.
+
+For canary rollouts the controller also owns the traffic weights on this
+ingress (spec.strategy.canary.trafficRouting.alb references it by name).
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "shopfast.fullname" . }}
+  labels:
+    {{- include "shopfast.labels" . | nindent 4 }}
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    # target-type ip is REQUIRED for Argo Rollouts ALB traffic shaping:
+    # weights are applied to pod IPs, not to node ports.
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/group.name: {{ .Values.ingress.group }}
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    {{- if .Values.ingress.certificateArn }}
+    alb.ingress.kubernetes.io/certificate-arn: {{ .Values.ingress.certificateArn | quote }}
+    {{- end }}
+    alb.ingress.kubernetes.io/healthcheck-path: /actuator/health/readiness
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "15"
+    alb.ingress.kubernetes.io/success-codes: "200"
+    alb.ingress.kubernetes.io/tags: Project={{ .Release.Namespace }},ManagedBy=argocd
+    {{- with .Values.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.ingressClassName }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "shopfast.fullname" . }}
+                port:
+                  number: {{ .Values.service.port }}
+{{- if and (eq .Values.deploymentStrategy "bluegreen") .Values.ingress.previewHost }}
+---
+{{/* Preview hostname: verify the green stack publicly before promoting it. */}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "shopfast.fullname" . }}-preview
+  labels:
+    {{- include "shopfast.labels" . | nindent 4 }}
+    shopfast.io/role: preview
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/group.name: {{ .Values.ingress.group }}
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    {{- if .Values.ingress.certificateArn }}
+    alb.ingress.kubernetes.io/certificate-arn: {{ .Values.ingress.certificateArn | quote }}
+    {{- end }}
+    alb.ingress.kubernetes.io/healthcheck-path: /actuator/health/readiness
+spec:
+  ingressClassName: {{ .Values.ingress.ingressClassName }}
+  rules:
+    - host: {{ .Values.ingress.previewHost | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "shopfast.fullname" . }}-preview
+                port:
+                  number: {{ .Values.service.port }}
+{{- end }}
+{{- end }}

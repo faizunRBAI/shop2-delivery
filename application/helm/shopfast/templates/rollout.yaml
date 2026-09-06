@@ -1,0 +1,54 @@
+{{- include "shopfast.validateStrategy" . -}}
+{{/*
+BLUE/GREEN and CANARY MODE ONLY.
+
+Rendered only when deploymentStrategy is bluegreen or canary, which is exactly
+when deployment.yaml renders nothing. Argo Rollouts owns the ReplicaSets and
+the traffic split; Kubernetes never sees a Deployment for this app.
+*/}}
+{{- if eq (include "shopfast.usesRollout" .) "true" }}
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: {{ include "shopfast.fullname" . }}
+  labels:
+    {{- include "shopfast.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "shopfast.selectorLabels" . | nindent 6 }}
+  template:
+    {{- include "shopfast.podSpec" . | nindent 4 }}
+  strategy:
+    {{- if eq .Values.deploymentStrategy "bluegreen" }}
+    blueGreen:
+      # Stable traffic keeps hitting the active Service until promotion.
+      activeService: {{ include "shopfast.fullname" . }}
+      # The new (green) ReplicaSet is reachable on the preview Service for
+      # verification before any production traffic moves.
+      previewService: {{ include "shopfast.fullname" . }}-preview
+      autoPromotionEnabled: {{ .Values.blueGreen.autoPromotionEnabled }}
+      # Keep the old ReplicaSet briefly so an abort is instantaneous.
+      scaleDownDelaySeconds: {{ .Values.blueGreen.scaleDownDelaySeconds }}
+      {{- with .Values.blueGreen.previewReplicaCount }}
+      previewReplicaCount: {{ . }}
+      {{- end }}
+    {{- else }}
+    canary:
+      # Canary pods are exposed through the canary Service; the ALB ingress
+      # weights traffic between stable and canary target groups.
+      stableService: {{ include "shopfast.fullname" . }}
+      canaryService: {{ include "shopfast.fullname" . }}-canary
+      maxSurge: {{ .Values.canary.maxSurge | quote }}
+      maxUnavailable: {{ .Values.canary.maxUnavailable }}
+      trafficRouting:
+        alb:
+          ingress: {{ include "shopfast.fullname" . }}
+          servicePort: {{ .Values.service.port }}
+          rootService: {{ include "shopfast.fullname" . }}
+      steps:
+        {{- toYaml .Values.canary.steps | nindent 8 }}
+    {{- end }}
+{{- end }}

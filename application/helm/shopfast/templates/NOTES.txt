@@ -1,0 +1,24 @@
+ShopFast released with strategy: {{ .Values.deploymentStrategy }}
+Image: {{ .Values.image.repository }}:{{ .Values.image.tag }}
+
+{{ if eq .Values.deploymentStrategy "standard" -}}
+Workload: apps/v1 Deployment (no Argo Rollout rendered).
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "shopfast.fullname" . }}
+
+{{ else if eq .Values.deploymentStrategy "bluegreen" -}}
+Workload: argoproj.io Rollout, blueGreen strategy (no Deployment rendered).
+  Active:  https://{{ .Values.ingress.host }}
+  Preview: https://{{ .Values.ingress.previewHost }}
+
+  Verify the preview, then promote:
+    kubectl argo rollouts -n {{ .Release.Namespace }} promote {{ include "shopfast.fullname" . }}
+  Abort instead:
+    kubectl argo rollouts -n {{ .Release.Namespace }} abort {{ include "shopfast.fullname" . }}
+
+{{ else -}}
+Workload: argoproj.io Rollout, canary strategy (no Deployment rendered).
+  URL: https://{{ .Values.ingress.host }}
+
+  Watch the traffic weights advance:
+    kubectl argo rollouts -n {{ .Release.Namespace }} get rollout {{ include "shopfast.fullname" . }} --watch
+{{ end }}

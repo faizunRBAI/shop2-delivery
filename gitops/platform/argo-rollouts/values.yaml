@@ -1,0 +1,36 @@
+# ---------------------------------------------------------------------------
+# Argo Rollouts controller.
+# Owns Rollout resources cluster-wide and manipulates ALB target-group weights
+# for canary traffic shifting (requires the AWS Load Balancer Controller,
+# installed by the bootstrap with an IRSA role from Terraform).
+# ---------------------------------------------------------------------------
+
+installCRDs: true
+
+controller:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      memory: 512Mi
+
+  metrics:
+    enabled: true
+
+# The Rollouts dashboard is an internal tool; it is NOT published on the ALB.
+# Argo CD's own UI shows rollout progress via the health customization.
+dashboard:
+  enabled: false
+
+# Grant the controller permission to read/modify Ingress objects so it can
+# adjust ALB canary weights.
+clusterInstall: true
+
+serviceAccount:
+  create: true
+  name: argo-rollouts
+
+notifications:
+  enabled: false

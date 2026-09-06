@@ -1,0 +1,201 @@
+# ---------------------------------------------------------------------------
+# vmagent: scrapes Kubernetes and application targets, remote-writes to
+# VictoriaMetrics. Needs cluster-wide read access for service discovery.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vmagent
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vmagent
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/metrics", "nodes/proxy", "services", "endpoints", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["extensions", "networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs: ["/metrics", "/metrics/cadvisor"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vmagent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vmagent
+subjects:
+  - kind: ServiceAccount
+    name: vmagent
+    namespace: monitoring
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vmagent-config
+  namespace: monitoring
+data:
+  scrape.yml: |
+    global:
+      scrape_interval: 30s
+      external_labels:
+        cluster: shop2-delivery-eks
+
+    scrape_configs:
+      # --- Kubernetes node metrics (kubelet) ---------------------------------
+      - job_name: kubernetes-nodes
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/$1/proxy/metrics
+
+      # --- Container metrics (cAdvisor) --------------------------------------
+      - job_name: kubernetes-cadvisor
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - action: labelmap
+            regex: __meta_kubernetes_node_label_(.+)
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/$1/proxy/metrics/cadvisor
+
+      # --- Any pod carrying prometheus.io/scrape=true ------------------------
+      # This is how the ShopFast pods (Spring Boot actuator) are discovered,
+      # in every strategy, without editing this config for each release.
+      - job_name: kubernetes-pods
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+          # Preserve the release colour so blue/green and canary splits are
+          # queryable in Grafana.
+          - source_labels: [__meta_kubernetes_pod_label_shopfast_io_release_color]
+            target_label: release_color
+
+      # --- kube-state-metrics ------------------------------------------------
+      - job_name: kube-state-metrics
+        static_configs:
+          - targets: ["kube-state-metrics.monitoring.svc:8080"]
+
+      # --- Argo CD and Argo Rollouts control-plane metrics --------------------
+      - job_name: argocd
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names: [argocd, argo-rollouts]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: (argocd-metrics|argocd-server-metrics|argocd-repo-server|argo-rollouts-metrics)
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_service_name]
+            target_label: service
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vmagent
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: vmagent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vmagent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vmagent
+      annotations:
+        # Re-roll the pod when the scrape config changes.
+        checksum/config: "v1"
+    spec:
+      serviceAccountName: vmagent
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+      containers:
+        - name: vmagent
+          image: victoriametrics/vmagent:v1.109.1
+          args:
+            - --promscrape.config=/config/scrape.yml
+            - --remoteWrite.url=http://victoriametrics.monitoring.svc:8428/api/v1/write
+            - --httpListenAddr=:8429
+            - --memory.allowedPercent=50
+          ports:
+            - name: http
+              containerPort: 8429
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: vmagent-config
+        - name: tmp
+          emptyDir: {}

@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ShopFast — GitOps Delivery Platform</title>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --fg:#e6edf3; --muted:#8b949e;
+          --blue:#3b82f6; --green:#22c55e; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+         background:var(--bg); color:var(--fg); line-height:1.55; }
+  .wrap { max-width:860px; margin:0 auto; padding:48px 24px 72px; }
+  h1 { font-size:2.1rem; margin:0 0 6px; letter-spacing:-.02em; }
+  .sub { color:var(--muted); margin:0 0 32px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px;
+          padding:22px 24px; margin-bottom:18px; }
+  .card h2 { font-size:.78rem; text-transform:uppercase; letter-spacing:.09em;
+             color:var(--muted); margin:0 0 16px; font-weight:600; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:16px; }
+  .k { font-size:.72rem; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); }
+  .v { font-size:1.05rem; font-weight:600; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+       word-break:break-all; }
+  .pill { display:inline-block; padding:3px 12px; border-radius:999px; font-size:.85rem;
+          font-weight:700; font-family:ui-monospace,monospace; }
+  .pill.blue { background:rgba(59,130,246,.16); color:#93c5fd; border:1px solid rgba(59,130,246,.45); }
+  .pill.green{ background:rgba(34,197,94,.16); color:#86efac; border:1px solid rgba(34,197,94,.45); }
+  ul { margin:0; padding-left:20px; color:var(--muted); }
+  ul li { margin-bottom:7px; }
+  code { background:#0b0f14; border:1px solid var(--line); border-radius:5px;
+         padding:2px 7px; font-size:.87rem; color:#e6edf3; }
+  a { color:var(--blue); }
+  .flow { font-family:ui-monospace,monospace; font-size:.83rem; color:var(--muted);
+          white-space:pre-wrap; margin:0; }
+  footer { color:var(--muted); font-size:.82rem; text-align:center; margin-top:34px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>ShopFast</h1>
+  <p class="sub">Spring Boot service delivered by Argo CD &amp; Argo Rollouts on Amazon EKS.</p>
+
+  <div class="card">
+    <h2>Live release — this response came from one pod</h2>
+    <div class="grid">
+      <div><div class="k">Release</div><div class="v"><span id="color" class="pill blue">…</span></div></div>
+      <div><div class="k">Version (git SHA)</div><div class="v" id="version">…</div></div>
+      <div><div class="k">Serving pod</div><div class="v" id="pod">…</div></div>
+      <div><div class="k">Served at</div><div class="v" id="ts">…</div></div>
+    </div>
+    <p class="sub" style="margin:18px 0 0;font-size:.86rem">
+      Refresh during a canary rollout: responses shift between the stable and canary
+      release as Argo Rollouts moves traffic weight.
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>Endpoints</h2>
+    <ul>
+      <li><code>GET /api/hello</code> — release-aware greeting</li>
+      <li><code>GET /api/info</code> — build and runtime metadata</li>
+      <li><code>GET /actuator/health</code> — liveness &amp; readiness probes</li>
+      <li><code>GET /actuator/prometheus</code> — metrics scraped by vmagent</li>
+    </ul>
+  </div>
+
+  <div class="card">
+    <h2>Delivery flow</h2>
+    <p class="flow">GitHub  →  GitHub Actions  →  Test + Trivy scan  →  Docker build
+      →  Amazon ECR (immutable :git-sha)  →  GitOps commit
+      →  Argo CD sync  →  EKS  →  Argo Rollouts (blue/green | canary)</p>
+  </div>
+
+  <footer>ShopFast · deployed by GitOps · never by <code>kubectl apply</code></footer>
+</div>
+
+<script>
+  function paint(d) {
+    document.getElementById('version').textContent = d.version || 'unknown';
+    document.getElementById('pod').textContent     = d.pod || 'unknown';
+    document.getElementById('ts').textContent      =
+      d.timestamp ? new Date(d.timestamp).toLocaleTimeString() : '—';
+    var c = document.getElementById('color');
+    var col = (d.releaseColor || 'blue').toLowerCase();
+    c.textContent = col;
+    c.className = 'pill ' + (col === 'green' ? 'green' : 'blue');
+  }
+  function load() {
+    fetch('/api/hello', { cache: 'no-store' })
+      .then(function (r) { return r.json(); })
+      .then(paint)
+      .catch(function () {
+        document.getElementById('version').textContent = 'unreachable';
+      });
+  }
+  load();
+  setInterval(load, 5000);
+</script>
+</body>
+</html>

@@ -1,0 +1,55 @@
+# ---------------------------------------------------------------------------
+# PRODUCTION RELEASE STATE for ShopFast.
+#
+# This file is the deployment. The app-release workflow rewrites image.tag to
+# the git SHA it just pushed to ECR and commits the change; Argo CD sees the
+# new desired state and Argo Rollouts performs the progressive delivery.
+#
+# Nothing else deploys this application. No kubectl apply, no helm upgrade.
+#
+# image.repository and ingress.certificateArn are filled in by the bootstrap
+# from terraform outputs on the first run.
+# ---------------------------------------------------------------------------
+
+# standard | bluegreen | canary
+deploymentStrategy: canary
+
+replicaCount: 3
+
+image:
+  repository: "PLACEHOLDER_ECR_REPOSITORY"
+  tag: "PLACEHOLDER_IMAGE_TAG"
+  pullPolicy: IfNotPresent
+
+release:
+  color: blue
+
+ingress:
+  enabled: true
+  host: shopfast.shop2.royalbengal.xyz
+  previewHost: shopfast-preview.shop2.royalbengal.xyz
+  ingressClassName: alb
+  certificateArn: "PLACEHOLDER_ACM_CERT_ARN"
+  group: shop2-delivery
+
+resources:
+  requests:
+    cpu: 150m
+    memory: 512Mi
+  limits:
+    memory: 1Gi
+
+canary:
+  steps:
+    - setWeight: 20
+    - pause: { duration: 60s }
+    - setWeight: 50
+    - pause: { duration: 120s }
+    - setWeight: 80
+    - pause: { duration: 60s }
+  maxSurge: "25%"
+  maxUnavailable: 0
+
+blueGreen:
+  autoPromotionEnabled: false
+  scaleDownDelaySeconds: 60

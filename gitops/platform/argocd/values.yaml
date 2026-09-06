@@ -1,0 +1,134 @@
+# ---------------------------------------------------------------------------
+# Argo CD configuration (upstream argo-cd chart).
+#
+# The dashboard is published at https://argocd.shop2.royalbengal.xyz through an
+# internet-facing ALB. TLS terminates at the ALB with the wildcard ACM
+# certificate, so the Argo CD server itself runs in --insecure mode: that is
+# the documented ALB pattern and it means the server speaks plain HTTP only
+# INSIDE the cluster, never on the wire. Port 80 redirects to 443.
+#
+# No kubectl port-forward is involved anywhere in this design.
+# ---------------------------------------------------------------------------
+
+global:
+  domain: argocd.shop2.royalbengal.xyz
+
+configs:
+  params:
+    # TLS is terminated by the ALB in front; see the note above.
+    server.insecure: true
+    # Argo CD reconciles the cluster; it must not be a Rollout controller.
+    application.namespaces: "argocd"
+
+  cm:
+    url: https://argocd.shop2.royalbengal.xyz
+    # Teach the Argo CD UI/health system about Argo Rollouts resources so a
+    # progressing canary shows as Progressing rather than Unknown.
+    resource.customizations.health.argoproj.io_Rollout: |
+      hs = {}
+      if obj.status ~= nil then
+        if obj.status.phase == "Healthy" then
+          hs.status = "Healthy"
+          hs.message = "Rollout is healthy"
+          return hs
+        end
+        if obj.status.phase == "Paused" then
+          hs.status = "Suspended"
+          hs.message = "Rollout is paused awaiting promotion"
+          return hs
+        end
+        if obj.status.phase == "Degraded" then
+          hs.status = "Degraded"
+          hs.message = "Rollout is degraded"
+          return hs
+        end
+      end
+      hs.status = "Progressing"
+      hs.message = "Rollout is progressing"
+      return hs
+    # Argo Rollouts writes these; they are not user intent.
+    resource.customizations.ignoreDifferences.argoproj.io_Rollout: |
+      jsonPointers:
+        - /spec/replicas
+
+  rbac:
+    # Read-only for everyone authenticated; the admin account retains full
+    # rights. Tighten further by wiring SSO and mapping groups here.
+    policy.default: role:readonly
+    policy.csv: |
+      p, role:platform-admin, applications, *, */*, allow
+      p, role:platform-admin, clusters, get, *, allow
+      p, role:platform-admin, repositories, *, *, allow
+      g, admin, role:platform-admin
+
+server:
+  replicas: 1
+
+  ingress:
+    enabled: true
+    ingressClassName: alb
+    hostname: argocd.shop2.royalbengal.xyz
+    annotations:
+      alb.ingress.kubernetes.io/scheme: internet-facing
+      alb.ingress.kubernetes.io/target-type: ip
+      alb.ingress.kubernetes.io/group.name: shop2-delivery
+      alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+      alb.ingress.kubernetes.io/ssl-redirect: "443"
+      alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      alb.ingress.kubernetes.io/backend-protocol: HTTP
+      alb.ingress.kubernetes.io/healthcheck-path: /healthz
+      alb.ingress.kubernetes.io/success-codes: "200"
+    # The ALB serves HTTP internally to the server (server.insecure=true).
+    tls: false
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 192Mi
+    limits:
+      memory: 512Mi
+
+  metrics:
+    enabled: true
+
+controller:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 250m
+      memory: 768Mi
+    limits:
+      memory: 1536Mi
+  metrics:
+    enabled: true
+
+repoServer:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 768Mi
+  metrics:
+    enabled: true
+
+applicationSet:
+  enabled: false
+
+notifications:
+  enabled: false
+
+dex:
+  # No external identity provider wired yet; local admin account is used.
+  # Enabling SSO is listed as an optional enhancement in the README.
+  enabled: false
+
+redis:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 96Mi
+    limits:
+      memory: 256Mi

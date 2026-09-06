@@ -1,0 +1,37 @@
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+.terraformrc
+terraform.rc
+
+# Never commit variable files: they are where secrets leak into git.
+*.tfvars
+*.tfvars.json
+
+# Java / Maven
+application/target/
+*.class
+*.jar
+*.war
+
+# Local kube/helm artifacts
+kubeconfig
+*.kubeconfig
+charts/*.tgz
+
+# Tooling
+trivy
+trivy.tgz
+.DS_Store
+.idea/
+.vscode/
+*.iml
+
+# Environment files
+.env
+.env.*

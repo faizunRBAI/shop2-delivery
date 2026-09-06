@@ -1,0 +1,60 @@
+{{- include "shopfast.validateStrategy" . -}}
+{{/* Stable / active Service — always present in every strategy. */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "shopfast.fullname" . }}
+  labels:
+    {{- include "shopfast.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "shopfast.selectorLabels" . | nindent 4 }}
+{{- if eq .Values.deploymentStrategy "bluegreen" }}
+---
+{{/*
+Blue/Green preview Service: routes to the NEW ReplicaSet only. Argo Rollouts
+manages the extra pod-hash selector on both Services; the chart must not set it.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "shopfast.fullname" . }}-preview
+  labels:
+    {{- include "shopfast.labels" . | nindent 4 }}
+    shopfast.io/role: preview
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "shopfast.selectorLabels" . | nindent 4 }}
+{{- end }}
+{{- if eq .Values.deploymentStrategy "canary" }}
+---
+{{/* Canary Service: the ALB weights traffic between this and the stable one. */}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "shopfast.fullname" . }}-canary
+  labels:
+    {{- include "shopfast.labels" . | nindent 4 }}
+    shopfast.io/role: canary
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "shopfast.selectorLabels" . | nindent 4 }}
+{{- end }}

@@ -1,0 +1,46 @@
+# ---------------------------------------------------------------------------
+# Argo Rollouts controller — provides the Rollout CRD that the ShopFast chart
+# renders for bluegreen and canary strategies, and drives ALB traffic weights.
+# Must be healthy BEFORE the shopfast Application syncs, hence sync-wave 0
+# against shopfast's wave 2.
+# ---------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argo-rollouts
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    - repoURL: https://argoproj.github.io/argo-helm
+      chart: argo-rollouts
+      targetRevision: 2.38.0
+      helm:
+        releaseName: argo-rollouts
+        valueFiles:
+          - $values/gitops/platform/argo-rollouts/values.yaml
+    - repoURL: PLACEHOLDER_REPO_URL
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argo-rollouts
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      # CRDs are large; skip the client-side annotation size limit.
+      - Replace=false
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m

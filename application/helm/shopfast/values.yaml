@@ -1,0 +1,122 @@
+# ---------------------------------------------------------------------------
+# ShopFast chart values.
+#
+# deploymentStrategy selects EXACTLY ONE workload kind:
+#   standard  -> apps/v1 Deployment
+#   bluegreen -> argoproj.io/v1alpha1 Rollout with a blueGreen strategy
+#   canary    -> argoproj.io/v1alpha1 Rollout with a canary strategy
+#
+# The templates are mutually exclusive by construction: deployment.yaml renders
+# only for "standard" and rollout.yaml only for the two Rollout modes, so a
+# Deployment can never be rendered alongside a Rollout. Any other value fails
+# the render with an explicit message (see _helpers.tpl).
+# ---------------------------------------------------------------------------
+deploymentStrategy: canary
+
+replicaCount: 3
+
+image:
+  repository: ""        # set by GitOps: <account>.dkr.ecr.<region>.amazonaws.com/<project>/shopfast
+  tag: ""               # set by GitOps: immutable git SHA. NEVER "latest".
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+release:
+  # Surfaced by the app at /api/hello and as a metric label, so a rollout is
+  # observable from both the browser and Grafana.
+  color: blue
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: true
+  # Public hostname served through the ALB provisioned by the AWS Load
+  # Balancer Controller. TLS terminates at the ALB using the ACM certificate.
+  host: shopfast.shop2.royalbengal.xyz
+  # Blue/Green preview hostname. Only used when deploymentStrategy=bluegreen.
+  previewHost: shopfast-preview.shop2.royalbengal.xyz
+  ingressClassName: alb
+  # Wildcard ACM cert ARN, injected by the bootstrap into the GitOps values.
+  certificateArn: ""
+  group: shop2-delivery
+  annotations: {}
+
+resources:
+  requests:
+    cpu: 150m
+    memory: 512Mi
+  limits:
+    # No CPU limit on purpose: CPU limits throttle JVM startup. Memory is
+    # limited because the JVM sizes its heap from the cgroup limit.
+    memory: 1Gi
+
+probes:
+  liveness:
+    path: /actuator/health/liveness
+    initialDelaySeconds: 40
+    periodSeconds: 15
+    timeoutSeconds: 3
+    failureThreshold: 4
+  readiness:
+    path: /actuator/health/readiness
+    initialDelaySeconds: 20
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+metrics:
+  # Scraped by vmagent via pod annotations.
+  enabled: true
+  path: /actuator/prometheus
+  port: 8080
+
+# --- Blue/Green settings ---------------------------------------------------
+blueGreen:
+  # false => a human (or the app-release workflow) must promote explicitly.
+  autoPromotionEnabled: false
+  # Seconds the previous ReplicaSet is kept after promotion, for instant abort.
+  scaleDownDelaySeconds: 60
+  previewReplicaCount: null
+
+# --- Canary settings -------------------------------------------------------
+canary:
+  # Traffic weight steps. Each pause is manual unless a duration is given.
+  steps:
+    - setWeight: 20
+    - pause: { duration: 60s }
+    - setWeight: 50
+    - pause: { duration: 120s }
+    - setWeight: 80
+    - pause: { duration: 60s }
+  maxSurge: "25%"
+  maxUnavailable: 0
+
+env: []
+nodeSelector: {}
+tolerations: []
+affinity: {}

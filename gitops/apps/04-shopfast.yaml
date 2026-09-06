@@ -1,0 +1,52 @@
+# ---------------------------------------------------------------------------
+# The ShopFast application itself.
+#
+# Chart source: application/helm/shopfast in THIS repository.
+# Release values: gitops/environments/production/shopfast-values.yaml — the
+# single file the CI pipeline edits when it bumps the image tag to a new git
+# SHA. That commit is the entire deployment: Argo CD does the rest.
+# ---------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: shopfast
+  namespace: argocd
+  annotations:
+    # Syncs after argo-rollouts so the Rollout CRD already exists.
+    argocd.argoproj.io/sync-wave: "2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: PLACEHOLDER_REPO_URL
+    targetRevision: main
+    path: application/helm/shopfast
+    helm:
+      releaseName: shopfast
+      valueFiles:
+        - values.yaml
+        - /gitops/environments/production/shopfast-values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: shopfast
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m
+  ignoreDifferences:
+    # Argo Rollouts owns replica counts during a progressive rollout; Argo CD
+    # must not fight it mid-flight.
+    - group: argoproj.io
+      kind: Rollout
+      jsonPointers:
+        - /spec/replicas

@@ -1,0 +1,355 @@
+version: 1
+name: shop2-delivery
+vcs: github
+
+rollback:
+  strategy: manual
+
+stages:
+  - id: lint
+    kind: lint
+    timeout_minutes: 20
+    steps:
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Compile the application
+        working-directory: application
+        run: mvn -B -ntp clean compile
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - name: Lint the chart in all three strategies
+        run: |
+          set -e
+          for strategy in standard bluegreen canary; do
+            echo "== helm lint (deploymentStrategy=$strategy)"
+            helm lint application/helm/shopfast \
+              --set deploymentStrategy=$strategy \
+              --set image.repository=example.dkr.ecr.us-east-1.amazonaws.com/shopfast \
+              --set image.tag=lintsha
+          done
+      - name: Assert the strategy invariant (never a Deployment with a Rollout)
+        run: bash .github/scripts/assert-strategy-exclusive.sh
+
+  - id: test
+    kind: test
+    needs: [lint]
+    timeout_minutes: 25
+    steps:
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Unit tests
+        working-directory: application
+        run: mvn -B -ntp test
+
+  - id: security
+    kind: security
+    needs: [lint]
+    timeout_minutes: 20
+    steps:
+      - name: Trivy filesystem and IaC scan
+        run: |
+          set -e
+          curl -fsSL -o trivy.tgz \
+            https://github.com/aquasecurity/trivy/releases/download/v0.58.1/trivy_0.58.1_Linux-64bit.tar.gz
+          tar -xzf trivy.tgz trivy
+          ./trivy fs --scanners vuln,secret --severity HIGH,CRITICAL \
+            --exit-code 0 --no-progress application
+          ./trivy config --severity HIGH,CRITICAL --exit-code 0 --no-progress infra
+
+  - id: provision
+    kind: provision
+    needs: [test, security]
+    timeout_minutes: 90
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+      TF_VAR_region: us-east-1
+      TF_VAR_base_domain: shop2.royalbengal.xyz
+    steps:
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+      - name: Terraform init
+        working-directory: infra
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+            -backend-config="region=us-east-1"
+      - name: Terraform validate
+        working-directory: infra
+        run: terraform validate
+      - name: Create the hosted zone first and print the nameservers
+        working-directory: infra
+        run: |
+          echo "Creating the Route 53 zone before anything that waits on DNS."
+          terraform apply -input=false -auto-approve -target=aws_route53_zone.platform
+          echo "::notice title=cPanel DNS delegation::Add these as NS records for the 'shop2' subdomain in cPanel."
+          terraform output -json route53_nameservers
+      - name: Terraform apply
+        working-directory: infra
+        run: terraform apply -input=false -auto-approve
+      - name: Show the provisioned endpoints
+        working-directory: infra
+        run: |
+          terraform output -raw eks_cluster_name && echo
+          terraform output -raw ecr_repository_url && echo
+          terraform output -json route53_nameservers
+
+  - id: configure
+    kind: configure
+    needs: [provision]
+    timeout_minutes: 60
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+      PROJECT_NAME: ${{ secrets.PROJECT_NAME }}
+      TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+      TF_VAR_region: us-east-1
+      TF_VAR_base_domain: shop2.royalbengal.xyz
+      ARGOCD_ADMIN_PASSWORD: ${{ secrets.ARGOCD_ADMIN_PASSWORD }}
+      GRAFANA_ADMIN_PASSWORD: ${{ secrets.GRAFANA_ADMIN_PASSWORD }}
+      GITOPS_REPO_URL: ${{ secrets.GITOPS_REPO_URL }}
+    steps:
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.33.0
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+      - name: Install htpasswd for the Argo CD credential hash
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends apache2-utils
+      - name: Read the cluster name from terraform state
+        id: tf
+        working-directory: infra
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+            -backend-config="region=us-east-1"
+          echo "cluster=$(terraform output -raw eks_cluster_name)" >> "$GITHUB_OUTPUT"
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "${{ steps.tf.outputs.cluster }}" --region us-east-1
+      - name: Bootstrap the AWS LB Controller, Argo CD and the App-of-Apps
+        run: bash gitops/bootstrap/bootstrap.sh
+        env:
+          CLUSTER_NAME: ${{ steps.tf.outputs.cluster }}
+          GITHUB_SHA: ${{ github.sha }}
+      - name: Commit the rendered GitOps manifests
+        run: bash .github/scripts/commit-rendered-gitops.sh
+
+  - id: verify
+    kind: verify
+    needs: [configure]
+    timeout_minutes: 40
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+      TF_VAR_region: us-east-1
+      TF_VAR_base_domain: shop2.royalbengal.xyz
+    steps:
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+          terraform_wrapper: false
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.33.0
+      - name: Read the cluster name from terraform state
+        id: tf
+        working-directory: infra
+        run: |
+          terraform init -input=false -reconfigure \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+            -backend-config="region=us-east-1"
+          echo "cluster=$(terraform output -raw eks_cluster_name)" >> "$GITHUB_OUTPUT"
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name "${{ steps.tf.outputs.cluster }}" --region us-east-1
+      - name: Verify the real AWS, EKS and Argo CD state
+        run: bash gitops/bootstrap/verify.sh
+
+destroy:
+  env:
+    AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+    AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    AWS_REGION: us-east-1
+    AWS_DEFAULT_REGION: us-east-1
+    TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+    TF_VAR_region: us-east-1
+    TF_VAR_base_domain: shop2.royalbengal.xyz
+  steps:
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.9.8
+        terraform_wrapper: false
+    - name: Setup kubectl
+      uses: azure/setup-kubectl@v4
+      with:
+        version: v1.33.0
+    - name: Terraform init
+      working-directory: infra
+      run: |
+        terraform init -input=false -reconfigure \
+          -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+          -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+          -backend-config="region=us-east-1"
+    - name: Remove Kubernetes-created load balancers before destroying the VPC
+      working-directory: infra
+      run: |
+        # ALBs and their security groups are created by the AWS Load Balancer
+        # Controller and are NOT in terraform state. Left behind, they hold ENIs
+        # in the subnets and `terraform destroy` hangs on the VPC for ~20 minutes
+        # before failing. Deleting the ingresses first lets the controller clean
+        # up its own resources.
+        CLUSTER="$(terraform output -raw eks_cluster_name 2>/dev/null || true)"
+        if [ -z "$CLUSTER" ]; then
+          echo "No cluster in state — nothing to clean up."
+          exit 0
+        fi
+        aws eks update-kubeconfig --name "$CLUSTER" --region us-east-1 || exit 0
+        kubectl delete ingress --all --all-namespaces --ignore-not-found --timeout=5m || true
+        kubectl -n argocd delete applications --all --ignore-not-found --timeout=5m || true
+        echo "Waiting for the load balancer controller to release its ENIs..."
+        sleep 90
+    - name: Terraform destroy
+      working-directory: infra
+      run: terraform destroy -input=false -auto-approve
+
+pipelines:
+  - id: app-release
+    stages:
+      - id: build_test
+        kind: test
+        timeout_minutes: 25
+        steps:
+          - name: Set up JDK 21
+            uses: actions/setup-java@v4
+            with:
+              distribution: temurin
+              java-version: "21"
+              cache: maven
+          - name: Test and package
+            working-directory: application
+            run: mvn -B -ntp clean verify
+
+      - id: image_scan
+        kind: security
+        needs: [build_test]
+        timeout_minutes: 25
+        steps:
+          - name: Set up JDK 21
+            uses: actions/setup-java@v4
+            with:
+              distribution: temurin
+              java-version: "21"
+              cache: maven
+          - name: Build the image locally for scanning
+            working-directory: application
+            run: docker build -t shopfast:${{ github.sha }} .
+          - name: Trivy image scan
+            run: |
+              set -e
+              curl -fsSL -o trivy.tgz \
+                https://github.com/aquasecurity/trivy/releases/download/v0.58.1/trivy_0.58.1_Linux-64bit.tar.gz
+              tar -xzf trivy.tgz trivy
+              ./trivy image --severity HIGH,CRITICAL --exit-code 0 --no-progress \
+                shopfast:${{ github.sha }}
+
+      - id: push_ecr
+        kind: build_push
+        needs: [image_scan]
+        timeout_minutes: 30
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: us-east-1
+          AWS_DEFAULT_REGION: us-east-1
+          TF_STATE_BUCKET: ${{ secrets.TF_STATE_BUCKET }}
+          PROJECT_NAME: ${{ secrets.PROJECT_NAME }}
+          TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+          TF_VAR_region: us-east-1
+          TF_VAR_base_domain: shop2.royalbengal.xyz
+        steps:
+          - name: Setup Terraform
+            uses: hashicorp/setup-terraform@v3
+            with:
+              terraform_version: 1.9.8
+              terraform_wrapper: false
+          - name: Build and push the immutable git-SHA tag to ECR
+            run: bash .github/scripts/push-image.sh "${{ github.sha }}"
+
+      - id: gitops_bump
+        kind: custom
+        needs: [push_ecr]
+        timeout_minutes: 15
+        steps:
+          - name: Bump the image tag in the GitOps values and commit
+            run: bash .github/scripts/gitops-bump.sh "${{ github.sha }}"
+
+      - id: rollout_verify
+        kind: verify
+        needs: [gitops_bump]
+        timeout_minutes: 40
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: us-east-1
+          AWS_DEFAULT_REGION: us-east-1
+          TF_VAR_project_name: ${{ secrets.PROJECT_NAME }}
+          TF_VAR_region: us-east-1
+          TF_VAR_base_domain: shop2.royalbengal.xyz
+        steps:
+          - name: Setup Terraform
+            uses: hashicorp/setup-terraform@v3
+            with:
+              terraform_version: 1.9.8
+              terraform_wrapper: false
+          - name: Setup kubectl
+            uses: azure/setup-kubectl@v4
+            with:
+              version: v1.33.0
+          - name: Read the cluster name from terraform state
+            id: tf
+            working-directory: infra
+            run: |
+              terraform init -input=false -reconfigure \
+                -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+                -backend-config="key=${{ secrets.PROJECT_NAME }}/terraform.tfstate" \
+                -backend-config="region=us-east-1"
+              echo "cluster=$(terraform output -raw eks_cluster_name)" >> "$GITHUB_OUTPUT"
+          - name: Update kubeconfig
+            run: aws eks update-kubeconfig --name "${{ steps.tf.outputs.cluster }}" --region us-east-1
+          - name: Wait for the Argo CD sync and the rollout of this SHA
+            run: bash .github/scripts/verify-rollout.sh "${{ github.sha }}"

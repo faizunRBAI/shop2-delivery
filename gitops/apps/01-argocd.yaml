@@ -1,0 +1,62 @@
+# ---------------------------------------------------------------------------
+# Argo CD manages ITSELF.
+#
+# After the bootstrap install, this Application takes ownership of the Argo CD
+# release. Changing Argo CD's own configuration is then a pull request against
+# gitops/platform/argocd/values.yaml, never a helm upgrade run by a human.
+#
+# Multi-source Application: the Helm chart comes from the upstream repo, the
+# values file comes from THIS repository (referenced as $values).
+# ---------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argocd
+  namespace: argocd
+  annotations:
+    # Sync first so the rest of the platform is reconciled by the version of
+    # Argo CD that this repository actually declares.
+    argocd.argoproj.io/sync-wave: "-1"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    - repoURL: https://argoproj.github.io/argo-helm
+      chart: argo-cd
+      targetRevision: 7.7.11
+      helm:
+        releaseName: argocd
+        valueFiles:
+          - $values/gitops/platform/argocd/values.yaml
+    - repoURL: PLACEHOLDER_REPO_URL
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      # prune disabled on Argo CD itself: a bad render must not delete the
+      # controller that would otherwise repair it.
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m
+  ignoreDifferences:
+    # The admin password is patched at bootstrap from a GitHub secret and must
+    # never be reverted by a sync.
+    - group: ""
+      kind: Secret
+      name: argocd-secret
+      jsonPointers:
+        - /data/admin.password
+        - /data/admin.passwordMtime

@@ -1,0 +1,13 @@
+target/
+.git/
+.github/
+.mvn/
+helm/
+*.md
+.gitignore
+.dockerignore
+**/*.iml
+.idea/
+.vscode/
+.env
+.env.*

@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------------------
+# THE ROOT APPLICATION (App-of-Apps).
+#
+# This is the ONLY object the bootstrap applies imperatively. It points at
+# gitops/apps/, where every other Application lives — so from this moment on,
+# the cluster's desired state is whatever is committed in this repository and
+# nothing else. Adding a platform component means committing a file there.
+# ---------------------------------------------------------------------------
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: PLACEHOLDER_REPO_URL
+    targetRevision: main
+    path: gitops/apps
+    directory:
+      recurse: true
+      include: "*.yaml"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 15s
+        factor: 2
+        maxDuration: 5m

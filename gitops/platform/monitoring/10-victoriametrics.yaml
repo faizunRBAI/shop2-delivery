@@ -1,0 +1,94 @@
+# ---------------------------------------------------------------------------
+# VictoriaMetrics single-node: the metrics store.
+#
+# Chosen over a full kube-prometheus-stack because this cluster has two
+# t3.large nodes that also run Argo CD, Argo Rollouts and the application.
+# VictoriaMetrics is Prometheus-API compatible, so Grafana queries it with the
+# Prometheus datasource type and PromQL works unchanged.
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: victoriametrics
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: victoriametrics
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8428
+      targetPort: http
+  selector:
+    app.kubernetes.io/name: victoriametrics
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: victoriametrics
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: victoriametrics
+spec:
+  serviceName: victoriametrics
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: victoriametrics
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: victoriametrics
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        fsGroup: 65534
+      containers:
+        - name: victoriametrics
+          image: victoriametrics/victoria-metrics:v1.109.1
+          args:
+            - --storageDataPath=/storage
+            - --retentionPeriod=15d
+            - --httpListenAddr=:8428
+            - --memory.allowedPercent=60
+          ports:
+            - name: http
+              containerPort: 8428
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 4
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: storage
+              mountPath: /storage
+  volumeClaimTemplates:
+    - metadata:
+        name: storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        # Provisioned by the aws-ebs-csi-driver addon installed by Terraform.
+        storageClassName: gp2
+        resources:
+          requests:
+            storage: 20Gi
